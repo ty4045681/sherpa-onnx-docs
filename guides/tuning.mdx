@@ -1,0 +1,200 @@
+---
+title: "sherpa-onnx KWS 三大核心参数调优：检测精度与误触率优化指南"
+sidebarTitle: "参数调优"
+description: "通过调整 keywords_score（默认 1.0）、keywords_threshold（默认 0.25）和 num_trailing_blanks（默认 1）三个参数优化 sherpa-onnx KWS 关键词检测准确率与误触发率，附各场景推荐参数组合与分步调参流程指南。"
+---
+
+sherpa-onnx KWS 的核心检测质量由三个参数控制，定义在 `KeywordSpotterConfig` 中：`keywords_score`（默认 1.0）、`keywords_threshold`（默认 0.25）和 `num_trailing_blanks`（默认 1）。通过合理组合这三个参数，可以在**漏检率**和**误触发率**之间找到适合你应用场景的平衡点。
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    # ... 模型路径 ...
+    keywords_score     = 1.0,   # 默认值
+    keywords_threshold = 0.25,  # 默认值
+    num_trailing_blanks = 1,    # 默认值
+)
+```
+
+---
+
+## 三个核心参数详解
+
+### 1. `keywords_score`（默认值：`1.0`）
+
+**作用**：为每个关键词的 token 序列打分时使用的权重系数。该值越高，关键词路径在波束搜索中获得的分数加成越大。
+
+| 调整方向 | 效果 | 适用场景 |
+|----------|------|----------|
+| **增大**（如 1.5 至 3.0） | 更容易检测到关键词，召回率升高 | 关键词经常漏检，环境较安静 |
+| **减小**（如 0.5 至 0.8） | 更严格，只有高置信度才触发，精确率升高 | 误触发过多，需要提高精度 |
+
+```python
+# 安静环境，担心漏检 → 适当增大 score
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    keywords_score = 1.5,
+)
+```
+
+### 2. `keywords_threshold`（默认值：`0.25`）
+
+**作用**：触发关键词的概率阈值。只有当模型对关键词的归一化得分超过此阈值时，才会报告检测结果。
+
+| 调整方向 | 效果 | 适用场景 |
+|----------|------|----------|
+| **增大**（如 0.4 至 0.6） | 更难触发，减少误触发 | 误触发率高，嘈杂环境 |
+| **减小**（如 0.1 至 0.2） | 更容易触发，减少漏检 | 漏检率高，关键词发音变化大 |
+
+```python
+# 嘈杂环境，误触发多 → 提高 threshold
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    keywords_threshold = 0.45,
+)
+```
+
+### 3. `num_trailing_blanks`（默认值：`1`）
+
+**作用**：关键词检测结束后，要求在检测到的 token 序列末尾额外观察到的空白帧（blank token）数量。
+
+该参数主要解决**关键词 token 序列之间存在重叠（overlap）**的问题——当两个关键词共享相同的前缀或后缀 token 时，增大此值可以避免相互干扰。
+
+| 调整方向 | 效果 | 适用场景 |
+|----------|------|----------|
+| **增大**（如 8 至 16） | 解决关键词重叠导致的连续误触发 | 多关键词之间有公共子串 |
+| **减小**（如 1） | 更快响应，延迟更低 | 关键词之间无重叠，单关键词场景 |
+
+```python
+# 关键词"你好小明"和"你好小红"存在重叠前缀 → 增大
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    num_trailing_blanks = 8,
+)
+```
+
+---
+
+## 不同场景的推荐参数组合
+
+| 场景 | `keywords_score` | `keywords_threshold` | `num_trailing_blanks` | 说明 |
+|------|:-:|:-:|:-:|----|
+| **安静环境，单关键词** | 1.0 | 0.25 | 1 | 默认参数，平衡召回与精度 |
+| **安静环境，关键词有重叠** | 1.0 | 0.25 | 8 | 避免重叠关键词互相干扰 |
+| **嘈杂环境（如室外、工厂）** | 1.2 | 0.40 | 1 | 提高 threshold 减少误触，提高 score 保召回 |
+| **极嘈杂环境（高误触要求低）** | 1.0 | 0.55 | 1 | 牺牲部分召回，换取极低误触发率 |
+| **关键词经常漏检** | 1.8 | 0.15 | 1 | 显著降低 threshold 和提高 score 以捕获弱发音 |
+| **多关键词 + 嘈杂环境** | 1.2 | 0.40 | 8 | 综合处理重叠和噪声两类问题 |
+
+---
+
+## 如何判断是漏检还是误触发问题
+
+在调参之前，首先需要明确当前的主要问题类型：
+
+```text
+关键词发出了，但没有触发
+        ↓
+      漏检问题
+→ 降低 keywords_threshold（如 0.25 → 0.15）
+→ 提高 keywords_score（如 1.0 → 1.5）
+→ 确认音频采样率是否为 16kHz
+→ 检查关键词文件格式是否正确
+
+没有说关键词（或说了其他词），但被触发了
+        ↓
+      误触发问题
+→ 提高 keywords_threshold（如 0.25 → 0.40）
+→ 降低 keywords_score（如 1.0 → 0.7）
+→ 增大 num_trailing_blanks（如 1 → 8）
+→ 检查是否调用了 reset_stream
+```
+
+---
+
+## 推荐调参步骤
+
+建议按照以下顺序调整参数，每次只改变一个参数，并在相同测试集上评估效果：
+
+**第一步：确定基线**
+
+使用默认参数（`score=1.0, threshold=0.25, blanks=1`）在目标环境中录制 10 至 20 条测试音频，统计漏检率和误触发率。
+
+**第二步：调整 `keywords_threshold`（优先）**
+
+`threshold` 是最直接影响触发难度的参数。每次调整幅度建议 0.05：
+- 误触发多 → `0.25 → 0.30 → 0.35 → …`
+- 漏检多 → `0.25 → 0.20 → 0.15 → …`
+
+**第三步：调整 `keywords_score`（辅助）**
+
+在 threshold 确定后，用 score 做微调：
+- 漏检仍偏多 → score 从 1.0 开始每次增加 0.2 至 0.5
+- 误触发仍偏多 → score 从 1.0 开始每次减少 0.1 至 0.2
+
+**第四步：调整 `num_trailing_blanks`（有重叠时）**
+
+如果多关键词之间存在公共 token，出现连续误触发时，将此值增大至 8 或 16，直到连续触发消失。
+
+---
+
+## 性能优化建议
+
+### 使用 int8 量化模型
+
+量化模型在体积和速度上均优于全精度模型，是移动端和嵌入式场景的首选：
+
+| 模型类型 | 大小（参考） | CPU 推理速度 |
+|----------|:-----------:|:-----------:|
+| 全精度（fp32） | ~13MB | 基准 |
+| int8 量化（-int8） | ~4MB | 约快 1.5–2× |
+
+选择带有 `int8` 或 `mobile` 后缀的模型文件即可：
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    encoder = "./model/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    decoder = "./model/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    joiner  = "./model/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+    ...
+)
+```
+
+### 合理设置 `num_threads`
+
+实时语音唤醒对延迟要求高，但对吞吐量要求不高，**1 个线程通常足够**：
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    num_threads = 1,   # 实时唤醒场景：1 线程节省资源
+)
+```
+
+多线程适用于批量音频文件处理场景，移动端建议保持 1 线程以避免抢占其他任务的 CPU 资源。
+
+### 选择合适的 `provider`
+
+根据运行平台选择最优的推理后端：
+
+| 平台 | 推荐 `provider` | 说明 |
+|------|:-----------:|------|
+| 服务器 / PC CPU | `"cpu"` | 默认，通用 |
+| NVIDIA GPU 服务器 | `"cuda"` | 需要 CUDA 版 sherpa-onnx |
+| Apple Silicon Mac | `"coreml"` | 利用 Neural Engine，能效比高 |
+| iPhone / iPad | `"coreml"` | 移动端 Neural Engine |
+| Android 手机 | `"cpu"` | NNAPI 支持有限，cpu 更稳定 |
+| 浏览器（WASM） | `"cpu"` | WASM 仅支持 cpu |
+
+```python
+import platform
+
+# 自动选择 provider
+if platform.system() == "Darwin":          # macOS
+    provider = "coreml"
+elif platform.system() == "Windows":       # 有 NVIDIA GPU 时
+    provider = "cuda"                      # 否则用 "cpu"
+else:
+    provider = "cpu"
+
+kws = sherpa_onnx.KeywordSpotter(..., provider=provider)
+```

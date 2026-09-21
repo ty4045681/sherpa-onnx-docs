@@ -1,0 +1,81 @@
+---
+title: "Sherpa-ONNX 关键词唤醒文档"
+sidebarTitle: "首页"
+description: "sherpa-onnx KWS 关键词唤醒完整中文文档。离线、跨平台、支持 12+ 编程语言，快速集成语音唤醒到您的应用。"
+---
+
+sherpa-onnx 是一个完全离线运行的语音处理库，本文档聚焦其**关键词唤醒（Keyword Spotting，KWS）**功能。无论您是在 Android、iOS、PC 还是嵌入式设备上开发，sherpa-onnx KWS 都能让您的应用实时监听并检测预设的唤醒词或命令词，无需联网，保护用户隐私。
+
+<CardGroup cols={2}>
+  <Card title="快速开始" icon="rocket" href="/quickstart">
+    五分钟内完成安装并运行第一个关键词唤醒示例
+  </Card>
+  <Card title="核心概念" icon="lightbulb" href="/concepts/kws-overview">
+    了解 KWS 工作原理、流式解码与关键词格式
+  </Card>
+  <Card title="预训练模型" icon="brain" href="/models/pretrained-models">
+    下载支持中文或英文的预训练 KWS 模型
+  </Card>
+  <Card title="Python API" icon="python" href="/api/python/keyword-spotter-class">
+    使用 Python 快速集成关键词唤醒功能
+  </Card>
+</CardGroup>
+
+## 支持的编程语言
+
+sherpa-onnx KWS 提供丰富的多语言绑定，满足不同开发场景需求。
+
+<CardGroup cols={3}>
+  <Card title="Python" icon="python" href="/api/python/installation">
+    pip 安装，3 行代码启动唤醒
+  </Card>
+  <Card title="C / C++" icon="c" href="/api/c/c-api">
+    最低延迟的原生接口
+  </Card>
+  <Card title="Go" icon="golang" href="/api/other/go">
+    Go 模块，一行导入
+  </Card>
+  <Card title="Rust" icon="rust" href="/api/other/rust">
+    类型安全的 Rust crate
+  </Card>
+  <Card title="Node.js" icon="node-js" href="/api/other/nodejs">
+    NPM 包，前后端通用
+  </Card>
+  <Card title="C# / .NET" icon="microsoft" href="/api/other/csharp">
+    NuGet 包，跨平台支持
+  </Card>
+</CardGroup>
+
+## 快速上手流程
+
+<Steps>
+  <Step title="安装 sherpa-onnx">
+    根据您的开发语言选择对应的安装方式，例如 Python 使用 `pip install sherpa-onnx`
+  </Step>
+  <Step title="下载预训练模型">
+    从 [GitHub Releases](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) 下载中文或英文 KWS 模型包
+  </Step>
+  <Step title="编写关键词文件">
+    创建 `keywords.txt`，每行一个关键词，按照拼音或 BPE 格式填写词元
+  </Step>
+  <Step title="运行关键词唤醒">
+    调用 `KeywordSpotter` API，实时检测音频流中的关键词
+  </Step>
+</Steps>
+
+## 核心特性
+
+<CardGroup cols={2}>
+  <Card title="完全离线" icon="wifi-slash">
+    所有推理在本地完成，无需任何网络连接，保护用户隐私
+  </Card>
+  <Card title="流式实时检测" icon="waveform">
+    基于流式 Transducer 模型，低延迟实时响应，适合语音唤醒场景
+  </Card>
+  <Card title="动态关键词" icon="list-plus">
+    每条流可在创建时动态追加关键词，无需重启 Spotter 实例
+  </Card>
+  <Card title="跨平台支持" icon="devices">
+    支持 Android、iOS、Windows、macOS、Linux、HarmonyOS 及 WebAssembly
+  </Card>
+</CardGroup>

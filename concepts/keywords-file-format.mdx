@@ -1,0 +1,174 @@
+---
+title: "sherpa-onnx KWS 关键词文件（keywords.txt）格式：拼音与 BPE 词元写法指南"
+sidebarTitle: "关键词格式"
+description: "本文介绍 sherpa-onnx KWS 关键词文件格式规范，涵盖中文拼音词元（x iǎo ài t óng x ué @小爱同学）和英文 BPE 词元写法、@ 显示文本标注、create_stream 动态关键词 / 分隔语法，附完整示例文件与常见问题解答。"
+---
+
+关键词文件（`keywords.txt`）是 sherpa-onnx KWS 最核心的配置文件之一。每行定义一个关键词，词元之间用空格分隔，可选地用 `@` 标注显示文本。中文模型使用拼音词元，英文模型使用 BPE 词元，格式均来自模型目录的 `tokens.txt`。
+
+## 文件基本格式
+
+关键词文件是一个纯文本文件（UTF-8 编码），格式规则如下：
+
+- **每行定义一个关键词**，不允许跨行。
+- **词元之间用空格分隔**（不同于汉字直接书写，必须写成模型可识别的词元序列）。
+- **`@` 符号后跟显示文本**（可选），定义关键词命中时 `get_result()` 返回给应用层的字符串。
+- 以 `#` 开头的行为注释，会被忽略。
+- 空行会被跳过。
+
+```text
+词元1 词元2 词元3 @显示文本
+```
+
+<Warning>
+  词元（token）的写法必须与模型目录中 `tokens.txt` 文件里的符号**完全一致**，包括声调标注方式、大小写及特殊字符（如 `▁`）。不同模型的词元格式可能不同，请先查阅对应模型的 `tokens.txt`。
+</Warning>
+
+---
+
+## 中文关键词：拼音词元
+
+中文模型（如 wenetspeech 系列）使用**拼音音节**作为词元。每个汉字对应一个拼音音节，音节的声母和韵母**分开写**，声调符号直接附加在韵母字母上。
+
+### 拼音词元示例
+
+**「小爱同学」**（4 个汉字对应 4 个音节，每个音节分声母与韵母）：
+
+```text
+x iǎo ài t óng x ué @小爱同学
+```
+
+| 汉字 | 声母 | 韵母 | 词元写法 |
+|------|------|------|---------|
+| 小   | x    | iǎo  | `x iǎo` |
+| 爱   | （无声母） | ài | `ài` |
+| 同   | t    | óng  | `t óng` |
+| 学   | x    | ué   | `x ué`  |
+
+**「你好小苑」**：
+
+```text
+n í h ǎo x iǎo y uàn @你好小苑
+```
+
+**「天猫精灵」**：
+
+```text
+t iān m āo j īng l íng @天猫精灵
+```
+
+<Note>
+  实际使用中，`tokens.txt` 里的符号直接带声调符（如 `ǎ`、`óng`），请**直接从 `tokens.txt` 中复制**对应音节的写法，不要手动猜测或转换。
+</Note>
+
+---
+
+## 英文关键词：BPE 词元
+
+英文模型使用 **BPE（Byte-Pair Encoding）** 词元。词边界以 `▁`（Unicode U+2581，字符左下方的下划线）标注单词开头。所有词元**大写**。
+
+### BPE 词元示例
+
+**「HELLO WORLD」**：
+
+```text
+▁HE LL O ▁WORLD @HELLO WORLD
+```
+
+**「HEY SIRI」**：
+
+```text
+▁HE Y ▁S IRI @Hey Siri
+```
+
+**「OK GOOGLE」**：
+
+```text
+▁OK ▁GO OG LE @OK Google
+```
+
+<Note>
+  英文词元的具体切分方式取决于模型训练时使用的 BPE 词表，同一个单词在不同模型中可能有不同的切分结果。请查阅对应英文模型的 `tokens.txt` 确认正确写法。
+</Note>
+
+---
+
+## `@` 符号的作用
+
+`@` 符号用于为关键词指定**应用层显示文本**（label）。
+
+```text
+词元序列 @显示文本
+```
+
+- 若**省略 `@` 部分**，`get_result()` 将返回词元序列本身（如拼音字符串）。
+- 若**写了 `@显示文本`**，`get_result()` 返回 `@` 后面的文字，便于在 UI 或日志中直接展示汉字或英文单词。
+
+```python
+result = kws.get_result(stream)
+# keywords.txt 中写了 "@小爱同学" → result == "小爱同学"
+# keywords.txt 中未写 "@"        → result == "x iǎo ài t óng x ué"
+print(f"唤醒词：{result}")
+```
+
+---
+
+## 动态关键词格式（`create_stream` 传入）
+
+在 `kws.create_stream()` 中直接以字符串方式传入关键词时，多个关键词用 **`/`** 分隔：
+
+```python
+# 单个动态关键词
+stream = kws.create_stream("y ǎn y uán @演员")
+
+# 多个动态关键词，用 / 分隔
+stream = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名/x iǎo ài @小爱")
+```
+
+这与在文件中写多行的效果等价，但作用域仅限于当前创建的流。
+
+---
+
+## 完整示例文件
+
+```text
+# 中文唤醒词 - 智能家居类
+x iǎo ài t óng x ué @小爱同学
+n í h ǎo x iǎo y uàn @你好小苑
+t iān m āo j īng l íng @天猫精灵
+
+# 中文唤醒词 - 指令类
+k āi sh ǐ l ù zh ì @开始录制
+jié sh ù l ù zh ì @结束录制
+x ià y ī zh āng @下一张
+sh àng y ī zh āng @上一张
+
+# 英文唤醒词
+▁HE Y ▁S IRI @Hey Siri
+▁OK ▁GO OG LE @OK Google
+▁HE Y ▁S NAPDR AG ON @Hey Snapdragon
+```
+
+---
+
+## 常见问题
+
+<AccordionGroup>
+
+<Accordion title="如何查找某个汉字的正确词元写法？">
+  打开模型目录中的 `tokens.txt`，搜索对应拼音字母串即可找到所有相关词元。例如搜索 `iǎo` 可找到 `x iǎo`、`n iǎo` 等。建议使用文本编辑器的正则搜索功能。
+</Accordion>
+
+<Accordion title="为什么设置了关键词但检测不到？">
+  最常见的原因是词元格式错误，请逐字对照 `tokens.txt`。其次可以尝试调小 `keywords_threshold`（如 0.1）或调大 `keywords_score`（如 2.0）提高灵敏度。详见[配置参数](/concepts/config-params)。
+</Accordion>
+
+<Accordion title="可以使用不在 tokens.txt 中的词元吗？">
+  不可以。关键词文件中出现的所有词元必须存在于模型的 `tokens.txt` 中。如果词元不存在，该行关键词会被静默跳过，不会报错但也不会生效。
+</Accordion>
+
+<Accordion title="关键词文件支持多少个关键词？">
+  技术上没有硬性上限，但关键词越多，解码候选路径的计算开销越大，延迟也会略有上升。实际应用中建议将一个关键词文件中的关键词数量控制在 100 个以内。
+</Accordion>
+
+</AccordionGroup>

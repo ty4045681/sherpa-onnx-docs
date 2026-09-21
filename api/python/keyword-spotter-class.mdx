@@ -1,0 +1,421 @@
+---
+title: "KeywordSpotter Python API 完整参考：构造参数、create_stream 等全部方法详解"
+sidebarTitle: "KeywordSpotter 类"
+description: "完整介绍 sherpa-onnx Python KeywordSpotter 类的 14 个构造参数与 8 个公开方法，涵盖 create_stream、decode_stream、get_result、reset_stream、tokens、timestamps 的签名、默认值、返回值与代码示例。"
+---
+
+`KeywordSpotter` 是 `sherpa-onnx` 中实现关键词唤醒（KWS）的核心 Python 类。它基于流式 Transducer 模型（Zipformer + RNN-T），配合关键词列表文件实现低延迟、高精度的关键词检测，支持在线流式解码和多流并行处理。以下为所有构造参数与公开方法的完整参考，所有签名均与源码一致。
+
+```python
+import sherpa_onnx
+
+kws = sherpa_onnx.KeywordSpotter(
+    tokens="./model/tokens.txt",
+    encoder="./model/encoder.onnx",
+    decoder="./model/decoder.onnx",
+    joiner="./model/joiner.onnx",
+    keywords_file="./model/keywords.txt",
+)
+```
+
+---
+
+## 构造函数
+
+```python
+sherpa_onnx.KeywordSpotter(
+    tokens,
+    encoder,
+    decoder,
+    joiner,
+    keywords_file,
+    num_threads=2,
+    sample_rate=16000,
+    feature_dim=80,
+    max_active_paths=4,
+    keywords_score=1.0,
+    keywords_threshold=0.25,
+    num_trailing_blanks=1,
+    provider="cpu",
+    device=0,
+)
+```
+
+### 必填参数
+
+<ParamField path="tokens" type="str" required>
+  `tokens.txt` 文件的路径。文件每行包含两列：
+
+  ```text
+  <符号>  <整数ID>
+  ```
+
+  例如：
+  ```text
+  <blk>  0
+  <sos/eos>  1
+  的  2
+  ```
+
+  该文件由模型训练时生成，与模型文件配套提供。
+</ParamField>
+
+<ParamField path="encoder" type="str" required>
+  Transducer Encoder 模型文件路径（`.onnx` 格式）。
+
+  例如：`encoder-epoch-12-avg-2-chunk-16-left-64.onnx`
+</ParamField>
+
+<ParamField path="decoder" type="str" required>
+  Transducer Decoder 模型文件路径（`.onnx` 格式）。
+
+  例如：`decoder-epoch-12-avg-2-chunk-16-left-64.onnx`
+</ParamField>
+
+<ParamField path="joiner" type="str" required>
+  Transducer Joiner 模型文件路径（`.onnx` 格式）。
+
+  例如：`joiner-epoch-12-avg-2-chunk-16-left-64.onnx`
+</ParamField>
+
+<ParamField path="keywords_file" type="str" required>
+  关键词文件路径。文件每行定义一个关键词/短语，使用 BPE、汉字或拼音（音节）表示，各音节之间以空格分隔。
+
+  中文示例（拼音格式）：
+  ```text
+  x iǎo ài t óng x ué
+  n ǐ h ǎo
+  ```
+
+  英文示例（BPE 格式）：
+  ```text
+  ▁HE LL O ▁WORLD
+  ▁HE Y ▁S IR I
+  ```
+</ParamField>
+
+### 可选参数
+
+<ParamField path="num_threads" type="int" default="2">
+  神经网络推理使用的线程数。在多核 CPU 上适当增大可提升实时率（RTF），建议值为 `1`–`4`。
+</ParamField>
+
+<ParamField path="sample_rate" type="float" default="16000">
+  模型训练所用的音频采样率（Hz）。**不要修改此参数**，应与模型保持一致。大多数预训练模型使用 `16000`（16kHz）。
+</ParamField>
+
+<ParamField path="feature_dim" type="int" default="80">
+  特征提取的维度（Fbank 滤波器组数量）。**不要修改此参数**，应与模型保持一致，通常为 `80`。
+</ParamField>
+
+<ParamField path="max_active_paths" type="int" default="4">
+  Beam Search 解码时保留的最大活跃路径数。值越大，解码越精确但速度越慢。推荐在 `4`–`8` 之间调整。
+</ParamField>
+
+<ParamField path="keywords_score" type="float" default="1.0">
+  关键词每个 Token 的 Boosting 分数。值越大，关键词 Token 在 Beam Search 中越容易存活，即更容易被触发。
+
+  - 若漏报率较高，可适当增大（如 `1.5`、`2.0`）
+  - 若误报率较高，可适当减小（如 `0.5`）
+</ParamField>
+
+<ParamField path="keywords_threshold" type="float" default="0.25">
+  关键词触发的概率阈值（置信度门限）。值越大越难触发（误报少但可能漏报），值越小越容易触发（召回高但误报增多）。
+
+  取值范围：`0.0`–`1.0`
+</ParamField>
+
+<ParamField path="num_trailing_blanks" type="int" default="1">
+  关键词触发后需要跟随的连续空白帧数量。当多个关键词共享相同前缀 Token 时，建议调大此值（如 `8`），以避免串扰。
+</ParamField>
+
+<ParamField path="provider" type="str" default='"cpu"'>
+  ONNX Runtime 执行后端（Execution Provider）。可选值：
+
+  | 值         | 含义                              |
+  | ---------- | --------------------------------- |
+  | `"cpu"`    | 纯 CPU 推理（默认，兼容性最好）   |
+  | `"cuda"`   | NVIDIA GPU 加速（需要 CUDA 环境） |
+  | `"coreml"` | Apple Neural Engine 加速（macOS） |
+</ParamField>
+
+<ParamField path="device" type="int" default="0">
+  当 `provider="cuda"` 时，指定使用的 CUDA 设备索引（从 `0` 开始）。多 GPU 环境下可指定不同设备。
+</ParamField>
+
+### 完整初始化示例
+
+```python
+import sherpa_onnx
+
+kws = sherpa_onnx.KeywordSpotter(
+    tokens="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt",
+    encoder="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+    decoder="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+    joiner="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+    keywords_file="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt",
+    num_threads=2,
+    max_active_paths=4,
+    keywords_score=1.0,
+    keywords_threshold=0.25,
+    num_trailing_blanks=1,
+    provider="cpu",
+)
+```
+
+---
+
+## 公开方法
+
+### `create_stream(keywords=None)` → `OnlineStream`
+
+创建一个新的解码流。每次处理一段新音频时，都应当创建独立的流对象。
+
+**参数：**
+
+<ParamField path="keywords" type="str | None" default="None">
+  动态追加的额外关键词字符串。格式与 `keywords_file` 相同，多个关键词之间以 `/` 分隔，每个关键词的音节以空格分隔，可在末尾用 `@汉字` 标注显示文本。
+
+  传入 `None` 时，仅使用 `keywords_file` 中的预定义关键词。
+</ParamField>
+
+**返回值：** `OnlineStream` 对象。
+
+```python
+# 仅使用 keywords_file 中预定义的关键词
+stream = kws.create_stream()
+
+# 追加 1 个新关键词（带显示标注）
+stream = kws.create_stream("y ǎn y uán @演员")
+
+# 追加 2 个新关键词，以 "/" 分隔
+stream = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+```
+
+---
+
+### `decode_stream(stream)`
+
+对单个流执行一步解码。每次调用会消耗流中已缓冲的若干帧特征，并更新内部解码状态。
+
+**参数：**
+
+<ParamField path="stream" type="OnlineStream" required>
+  要解码的流对象，由 `create_stream()` 创建。
+</ParamField>
+
+```python
+while kws.is_ready(stream):
+    kws.decode_stream(stream)
+    result = kws.get_result(stream)
+    if result:
+        print(f"检测到关键词：{result}")
+        kws.reset_stream(stream)
+```
+
+---
+
+### `decode_streams(streams)`
+
+对多个流同时执行批量解码，适合需要同时检测多路音频流（如多个说话人）的场景。批量解码比逐一调用 `decode_stream` 效率更高。
+
+**参数：**
+
+<ParamField path="streams" type="List[OnlineStream]" required>
+  需要同时解码的流对象列表。
+</ParamField>
+
+```python
+stream1 = kws.create_stream()
+stream2 = kws.create_stream()
+
+stream1.accept_waveform(16000, audio1)
+stream2.accept_waveform(16000, audio2)
+
+# 批量解码两路流
+ready_streams = [s for s in [stream1, stream2] if kws.is_ready(s)]
+if ready_streams:
+    kws.decode_streams(ready_streams)
+```
+
+---
+
+### `is_ready(stream)` → `bool`
+
+检查流中是否已缓冲了足够帧数以供解码。应在每次调用 `decode_stream` 前调用此方法。
+
+**参数：**
+
+<ParamField path="stream" type="OnlineStream" required>
+  要检查的流对象。
+</ParamField>
+
+**返回值：** `True` 表示可以解码；`False` 表示帧数不足，需要继续喂入音频。
+
+```python
+# 标准解码循环
+while kws.is_ready(stream):
+    kws.decode_stream(stream)
+```
+
+---
+
+### `get_result(stream)` → `str`
+
+获取当前解码状态下检测到的关键词字符串。若尚未检测到关键词，返回空字符串 `""`（不是 `None`）。底层实现为 `self.keyword_spotter.get_result(s).keyword.strip()`。
+
+**参数：**
+
+<ParamField path="stream" type="OnlineStream" required>
+  要获取结果的流对象。
+</ParamField>
+
+**返回值：** 检测到的关键词字符串（已去除首尾空格）；未检测到时返回 `""`。
+
+<Warning>
+  **检测到关键词后必须立即调用 `reset_stream`！**
+
+  `get_result` 返回非空字符串后，若不立即调用 `reset_stream`，后续的 `get_result` 调用将持续返回同一关键词，造成**重复触发**。
+
+  正确用法：
+
+  ```python
+  result = kws.get_result(stream)
+  if result != "":
+      print(f"检测到：{result}")
+      kws.reset_stream(stream)  # ← 必须立即重置！
+  ```
+</Warning>
+
+---
+
+### `reset_stream(stream)`
+
+重置流的解码状态，清除已检测到的关键词记录，以便继续检测后续关键词。**检测到关键词后必须调用此方法。**
+
+**参数：**
+
+<ParamField path="stream" type="OnlineStream" required>
+  要重置的流对象。
+</ParamField>
+
+```python
+result = kws.get_result(stream)
+if result:
+    print(f"触发：{result}")
+    kws.reset_stream(stream)  # 重置，准备下次检测
+```
+
+---
+
+### `tokens(stream)` → `List[str]`
+
+获取当前检测到的关键词的 Token 列表（音节或 BPE 片段级别）。
+
+**参数：**
+
+<ParamField path="stream" type="OnlineStream" required>
+  要获取 Token 列表的流对象。
+</ParamField>
+
+**返回值：** 字符串列表，每个元素是一个 Token（如拼音音节 `"x"`、`"iǎo"` 或 BPE 片段 `"▁HE"`、`"LL"`）。
+
+```python
+kws.decode_stream(stream)
+if kws.get_result(stream):
+    tokens = kws.tokens(stream)
+    print(f"Token 序列：{tokens}")
+    # 示例输出：['x', 'iǎo', 'ài', 't', 'óng', 'x', 'ué']
+    kws.reset_stream(stream)
+```
+
+---
+
+### `timestamps(stream)` → `List[float]`
+
+获取当前检测到的关键词中每个 Token 的时间戳（秒）。时间戳与 `tokens()` 返回的列表一一对应。
+
+**参数：**
+
+<ParamField path="stream" type="OnlineStream" required>
+  要获取时间戳列表的流对象。
+</ParamField>
+
+**返回值：** 浮点数列表，每个元素为对应 Token 在音频中的起始时间（秒）。
+
+```python
+kws.decode_stream(stream)
+if kws.get_result(stream):
+    tokens = kws.tokens(stream)
+    timestamps = kws.timestamps(stream)
+    for token, ts in zip(tokens, timestamps):
+        print(f"  {ts:.3f}s  {token}")
+    kws.reset_stream(stream)
+```
+
+示例输出：
+
+```text
+  0.240s  x
+  0.320s  iǎo
+  0.400s  ài
+  0.520s  t
+  0.600s  óng
+  0.720s  x
+  0.800s  ué
+```
+
+---
+
+## 完整使用示例
+
+以下示例展示了 `KeywordSpotter` 所有核心方法的组合使用：
+
+```python
+import numpy as np
+import soundfile as sf
+import sherpa_onnx
+
+# 1. 初始化
+kws = sherpa_onnx.KeywordSpotter(
+    tokens="./model/tokens.txt",
+    encoder="./model/encoder.onnx",
+    decoder="./model/decoder.onnx",
+    joiner="./model/joiner.onnx",
+    keywords_file="./model/keywords.txt",
+    num_threads=2,
+    keywords_score=1.0,
+    keywords_threshold=0.25,
+)
+
+# 2. 读取音频
+audio, sample_rate = sf.read("test.wav", dtype="float32")
+tail_paddings = np.zeros(int(0.66 * sample_rate), dtype=np.float32)
+
+# 3. 创建流（动态追加关键词）
+stream = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+stream.accept_waveform(sample_rate, audio)
+stream.accept_waveform(sample_rate, tail_paddings)
+stream.input_finished()
+
+# 4. 解码循环
+while kws.is_ready(stream):
+    kws.decode_stream(stream)
+    result = kws.get_result(stream)
+    if result:
+        tokens = kws.tokens(stream)
+        timestamps = kws.timestamps(stream)
+        print(f"检测到关键词：{result}")
+        print(f"  Token：{tokens}")
+        print(f"  时间戳：{[f'{t:.3f}s' for t in timestamps]}")
+        kws.reset_stream(stream)  # 重置，避免重复触发
+```
+
+---
+
+## 相关链接
+
+- [安装 sherpa-onnx Python 包](/api/python/installation)
+- [从音频文件检测关键词](/api/python/from-file)
+- [从麦克风实时检测关键词](/api/python/from-microphone)
+- [预训练模型列表](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)

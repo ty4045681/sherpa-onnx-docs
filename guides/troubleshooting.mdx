@@ -1,0 +1,510 @@
+---
+title: "sherpa-onnx KWS 故障排查：漏检、误触发与 reset_stream 常见问题"
+sidebarTitle: "故障排查"
+description: "解决 sherpa-onnx KWS 使用中最常见的问题：模型加载路径错误、关键词文件格式不正确、音频采样率不匹配导致漏检、误触发率过高、忘记调用 reset_stream 导致持续重复触发、麦克风权限配置，以及 Apple Silicon 架构不兼容等故障排查方法。"
+---
+
+本页汇总了用户在使用 sherpa-onnx KWS 时最常见的问题及解决方案。遇到问题时，建议先过一遍快速自检清单，通常可以快速定位根因。
+
+## 快速自检清单
+
+在查阅具体问题之前，请先确认以下基本项：
+
+- [ ] 音频采样率为 **16kHz**，单声道，16-bit PCM
+- [ ] 模型文件路径正确，文件完整无损
+- [ ] 关键词文件使用 **UTF-8** 编码
+- [ ] 检测到关键词后已调用 `reset_stream()`
+- [ ] Python 版本不低于 3.7，sherpa-onnx 版本为最新
+
+---
+
+<AccordionGroup>
+
+<Accordion title="模型加载失败（FileNotFoundError / 路径错误）">
+
+**错误表现**
+
+```text
+RuntimeError: Failed to load model from: ./model/encoder.onnx
+FileNotFoundError: [Errno 2] No such file or directory
+```
+
+**排查步骤**
+
+1. **确认文件是否存在**：
+
+```bash
+# 列出模型目录中的所有文件
+ls -lh ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+```
+
+2. **确认路径使用绝对路径或相对于工作目录的路径**：
+
+```python
+import os
+
+model_dir = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+encoder   = os.path.join(model_dir, "encoder-epoch-12-avg-2-chunk-16-left-64.onnx")
+
+# 验证文件存在
+assert os.path.isfile(encoder), f"文件不存在：{encoder}"
+```
+
+3. **确认文件完整下载**（MD5/SHA256 校验）：
+
+```bash
+# 如果文件大小为 0 或异常偏小，重新下载
+du -h ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/*.onnx
+```
+
+典型的 encoder/decoder/joiner 文件大小应在几百 KB 到几十 MB 之间。若某个文件接近 0 字节，说明下载未完成。
+
+4. **重新下载模型**：
+
+```bash
+# 使用官方 huggingface 或 modelscope 下载
+huggingface-cli download k2-fsa/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01 --local-dir ./model
+```
+
+</Accordion>
+
+<Accordion title="安装 sherpa-onnx 失败">
+
+**错误表现**
+
+```text
+ERROR: Could not find a version that satisfies the requirement sherpa-onnx
+pip: command not found
+error: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.32' not found
+```
+
+**解决方案**
+
+1. **确认 Python 和 pip 版本**：
+
+```bash
+python3 --version   # 需要 3.7 或以上
+pip3 --version
+# 升级 pip
+pip3 install --upgrade pip
+```
+
+2. **glibc 版本过低**（常见于 Ubuntu 18.04 / CentOS 7 等旧系统）：
+
+```bash
+# 检查 glibc 版本
+ldd --version | head -1
+```
+
+如果 glibc 版本低于 2.28，可以：
+- 升级操作系统
+- 使用 Docker 容器（推荐 `ubuntu:22.04` 或 `python:3.10-slim`）
+- 从源码编译 sherpa-onnx
+
+3. **网络问题导致下载失败**，使用镜像源：
+
+```bash
+pip3 install sherpa-onnx -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+4. **指定平台安装**（如需 GPU 版本）：
+
+```bash
+# CPU 版本（默认）
+pip3 install sherpa-onnx
+
+# CUDA 版本（Linux + NVIDIA GPU）
+pip3 install sherpa-onnx-cuda  # 或查看官方文档获取最新安装命令
+```
+
+</Accordion>
+
+<Accordion title="关键词文件格式错误导致无检测结果">
+
+**错误表现**
+
+程序正常运行，但永远检测不到任何关键词，也没有错误信息。
+
+**常见格式错误**
+
+关键词文件（`keywords.txt`）中每个关键词必须使用 **token 序列**格式，而不是普通汉字或英文单词直接拼写。以下是正确与错误格式对比：
+
+```text
+# 错误：直接写汉字（模型无法识别）
+你好小爱
+小米之家
+
+# 错误：拼音没有声调
+ni hao xiao ai
+
+# 正确：中文关键词，使用带声调的拼音 token，空格分隔
+n ǐ h ǎo x iǎo ài @你好小爱
+x iǎo m ǐ zh ī j iā @小米之家
+
+# 正确：英文关键词，使用 BPE token（取决于具体模型）
+▁HE LL O ▁W OR LD @hello world
+```
+
+**如何验证 token**
+
+查看模型的 `tokens.txt` 文件，确认你写的 token 都在词表中：
+
+```python
+# 读取 tokens.txt 并检查关键词 token 是否存在
+with open("./model/tokens.txt") as f:
+    vocab = set(line.strip().split()[0] for line in f if line.strip())
+
+# 检查关键词的每个 token
+keyword_tokens = ["n", "ǐ", "h", "ǎo"]
+for tok in keyword_tokens:
+    if tok not in vocab:
+        print(f"警告：token '{tok}' 不在词表中！")
+    else:
+        print(f"确认：token '{tok}' 存在")
+```
+
+**`@` 符号的作用**
+
+关键词末尾的 `@显示名称` 是可选的，作用是在检测结果中显示可读名称：
+
+```text
+# 检测到时返回 "你好小爱" 而不是 token 序列
+n ǐ h ǎo x iǎo ài @你好小爱
+```
+
+</Accordion>
+
+<Accordion title="检测不到关键词（漏检）">
+
+**表现**：说了关键词但没有触发，`get_result()` 持续返回空字符串。
+
+**排查清单**
+
+**1. 检查音频采样率**
+
+这是最常见原因。模型要求输入为 **16kHz** 单声道音频。若麦克风以 44100Hz 或 48000Hz 采样，必须重采样：
+
+```python
+import sounddevice as sd
+import numpy as np
+from scipy import signal
+
+# 以 44100Hz 录制
+audio_44k, _ = sd.rec(44100, samplerate=44100, channels=1, dtype='float32')
+sd.wait()
+
+# 重采样到 16000Hz
+audio_16k = signal.resample_poly(audio_44k.flatten(), 16000, 44100)
+
+# 送入 KWS
+stream.accept_waveform(16000, audio_16k)
+```
+
+**2. 降低检测阈值**
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    keywords_score     = 1.5,   # 提高（默认 1.0）
+    keywords_threshold = 0.15,  # 降低（默认 0.25）
+)
+```
+
+**3. 确认输入音频时长足够**
+
+KWS 需要一定长度的上下文，不要在说完关键词后立刻截断：
+
+```python
+# 末尾添加 0.6 秒静音填充
+tail_padding = np.zeros(int(0.66 * 16000), dtype=np.float32)
+stream.accept_waveform(16000, samples)
+stream.accept_waveform(16000, tail_padding)
+stream.input_finished()
+```
+
+**4. 检查关键词文件 token 格式**
+
+参考上方「关键词文件格式错误」问题。
+
+</Accordion>
+
+<Accordion title="误触发过多">
+
+**表现**：没有说关键词（或说了完全不相关的内容）时，KWS 频繁触发。
+
+**解决方案**
+
+**1. 提高检测阈值，降低 score**
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    keywords_score     = 0.8,   # 降低（默认 1.0）
+    keywords_threshold = 0.40,  # 提高（默认 0.25）
+)
+```
+
+**2. 增大 `num_trailing_blanks`**
+
+如果多个关键词共享 token 前缀/后缀，检测到一个关键词后容易立刻再次检测：
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    ...,
+    num_trailing_blanks = 8,   # 默认 1，增大以消除重叠触发
+)
+```
+
+**3. 确认噪声环境**
+
+在嘈杂环境中，可以在 KWS 前加一层 VAD（语音活动检测），只在检测到真实语音时才送入 KWS：
+
+```python
+# 伪代码：结合 VAD 使用
+vad = sherpa_onnx.VoiceActivityDetector(...)
+if vad.is_speech(chunk):
+    stream.accept_waveform(16000, chunk)
+    # ... 运行 KWS ...
+```
+
+</Accordion>
+
+<Accordion title="检测到关键词后持续重复触发">
+
+**表现**：只说了一次关键词，但 `get_result()` 反复返回相同的关键词（触发数十次）。
+
+**原因**：这是**最常见的错误**——检测到关键词后没有调用 `reset_stream()`。
+
+`reset_stream()` 会清空流的内部检测状态，如果不调用，同一个关键词会在后续每次 `decode_stream()` 循环中持续被报告。
+
+**正确用法**：
+
+```python
+while kws.is_ready(stream):
+    kws.decode_stream(stream)
+
+result = kws.get_result(stream)
+if result != "":
+    print(f"检测到关键词：{result}")
+
+    # 关键：检测到后立刻 reset
+    kws.reset_stream(stream)
+
+    # 执行唤醒逻辑...
+```
+
+**错误用法（忘记 reset）**：
+
+```python
+# 不要这样写！
+while kws.is_ready(stream):
+    kws.decode_stream(stream)
+result = kws.get_result(stream)
+if result != "":
+    print(f"检测到：{result}")
+    # 漏掉了 kws.reset_stream(stream) ← 导致持续重复触发
+```
+
+</Accordion>
+
+<Accordion title="麦克风没有声音或 sounddevice 报错">
+
+**错误表现**
+
+```text
+PortAudioError: [Errno -9999] Unanticipated host error
+ModuleNotFoundError: No module named 'sounddevice'
+OSError: [Errno -9996] Invalid input device
+```
+
+**解决方案**
+
+**1. 安装 sounddevice 和 PortAudio**
+
+```bash
+# macOS
+brew install portaudio
+pip3 install sounddevice
+
+# Ubuntu / Debian
+sudo apt-get install portaudio19-dev python3-pyaudio
+pip3 install sounddevice
+
+# Windows
+pip3 install sounddevice  # PortAudio 已包含在 wheel 中
+```
+
+**2. 列出可用音频设备**
+
+```python
+import sounddevice as sd
+print(sd.query_devices())
+# 找到你的麦克风设备 ID
+```
+
+**3. 指定设备 ID**
+
+```python
+import sounddevice as sd
+
+DEVICE_ID = 1   # 替换为你的麦克风设备 ID
+
+with sd.InputStream(
+    device=DEVICE_ID,
+    samplerate=16000,
+    channels=1,
+    dtype='float32',
+    blocksize=512,
+) as stream:
+    ...
+```
+
+**4. Linux 权限问题**
+
+```bash
+# 将当前用户加入 audio 组
+sudo usermod -a -G audio $USER
+# 重新登录后生效
+```
+
+**5. 检查麦克风系统权限（macOS）**
+
+系统偏好设置 → 安全性与隐私 → 麦克风 → 确认终端或你的应用已获得权限。
+
+</Accordion>
+
+<Accordion title="在 Apple Silicon Mac 上崩溃或 Illegal Instruction">
+
+**错误表现**
+
+```text
+zsh: illegal hardware instruction python3
+Abort trap: 6
+```
+
+**原因**：在 Apple Silicon（M1/M2/M3/M4）上运行了为 Intel x86_64 编译的 sherpa-onnx 二进制。
+
+**解决方案**
+
+**1. 确认使用 arm64 原生 Python**
+
+```bash
+# 检查当前 Python 架构
+python3 -c "import platform; print(platform.machine())"
+# 应输出 'arm64'，如果输出 'x86_64' 说明在 Rosetta 下运行
+
+# 安装 arm64 原生 Python（推荐使用 Homebrew）
+/opt/homebrew/bin/brew install python3
+```
+
+**2. 重新安装 sherpa-onnx**
+
+```bash
+# 卸载旧版本
+pip3 uninstall sherpa-onnx
+
+# 重新安装（pip 会自动选择 arm64 wheel）
+pip3 install sherpa-onnx
+```
+
+**3. 验证安装架构**
+
+```bash
+python3 -c "import sherpa_onnx; print('安装成功')"
+# 使用 file 命令验证库文件架构
+python3 -c "import sherpa_onnx, os; print(os.path.dirname(sherpa_onnx.__file__))"
+# 找到路径后
+file /path/to/sherpa_onnx/_sherpa_onnx.so
+# 应显示：Mach-O 64-bit dynamically linked shared library arm64
+```
+
+</Accordion>
+
+<Accordion title="在 Android 上模型文件太大，APK 体积超标">
+
+**表现**：集成模型后 APK 体积过大（超过 50MB 甚至 100MB），应用商店审核或用户下载受阻。
+
+**解决方案**
+
+**1. 使用 int8 量化 Mobile 版模型**
+
+选择带 `-int8` 或 `-mobile` 后缀的轻量版模型，体积可降低约 50%：
+
+```text
+# 普通版（较大）
+encoder-epoch-12-avg-2-chunk-16-left-64.onnx        (~8MB)
+
+# int8 量化版（推荐）
+encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx   (~3MB)
+```
+
+**2. 按需下载（On-Demand Resource）**
+
+不将模型打包进 APK，改为首次启动时从远端下载并缓存到本地：
+
+```kotlin
+// 首次启动时下载模型
+fun downloadModelIfNeeded(context: Context, onComplete: () -> Unit) {
+    val modelDir = File(context.filesDir, "kws_model")
+    if (modelDir.exists() && modelDir.list()?.isNotEmpty() == true) {
+        onComplete()
+        return
+    }
+    // 从你的 CDN 或 GitHub Releases 下载
+    // 下载完成后调用 onComplete()
+}
+```
+
+**3. 使用 Android App Bundle（AAB）**
+
+发布时使用 AAB 格式，Google Play 会按用户设备架构自动分发对应的 `.so` 文件，避免打包全部架构的冗余 native library：
+
+```gradle
+android {
+    bundle {
+        abi { enableSplit = true }
+    }
+}
+```
+
+**4. 只打包目标架构**
+
+在 `build.gradle` 中限制只包含 arm64-v8a（覆盖 95% 以上现代设备）：
+
+```gradle
+android {
+    defaultConfig {
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+}
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## 获取帮助
+
+如果上述方案未能解决你的问题，可以通过以下渠道获得社区支持：
+
+<CardGroup cols={2}>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/k2-fsa/sherpa-onnx/issues">
+    提交 Bug 报告或功能请求。请附上操作系统、Python 版本、sherpa-onnx 版本、完整错误信息和最小复现代码。
+  </Card>
+  <Card title="GitHub Discussions" icon="comments" href="https://github.com/k2-fsa/sherpa-onnx/discussions">
+    提问使用问题、分享使用经验或讨论功能设计。
+  </Card>
+</CardGroup>
+
+提交问题时请提供以下信息，有助于更快定位问题：
+
+```bash
+# 收集环境信息
+python3 --version
+pip3 show sherpa-onnx
+python3 -c "import platform; print(platform.platform())"
+```

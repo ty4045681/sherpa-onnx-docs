@@ -1,0 +1,334 @@
+---
+title: "在浏览器中使用 sherpa-onnx KWS 实现 WebAssembly 关键词唤醒"
+sidebarTitle: "WebAssembly"
+description: "使用 sherpa-onnx WebAssembly 版本在浏览器实现纯前端离线关键词唤醒，涵盖 Emscripten 4.0.23 编译环境搭建、SharedArrayBuffer 所需的 COOP/COEP 跨域隔离响应头配置，以及 JavaScript 集成完整代码示例。"
+---
+
+sherpa-onnx 提供专门的 WebAssembly（WASM）构建目标，可将 KWS 功能完整地运行在浏览器中，无需任何后端服务器。推理计算在用户浏览器本地执行，音频数据不离开用户设备，一次加载模型文件后断网仍可正常工作。
+
+### WASM 版本核心特性
+
+| 特性 | 说明 |
+|------|------|
+| **纯前端运行** | 推理计算在用户浏览器本地执行，零服务器成本 |
+| **完全离线** | 一次加载模型文件后，断网仍可正常工作 |
+| **隐私保护** | 音频数据不离开用户设备 |
+| **SIMD 加速** | 启用 WebAssembly SIMD 指令集，显著提升推理速度 |
+| **跨平台** | 支持所有现代桌面/移动浏览器 |
+
+---
+
+## 从源码编译
+
+### 前置依赖：安装 Emscripten
+
+构建脚本要求使用 **emsdk 4.0.23**（已验证可用版本），其他版本可能存在兼容问题：
+
+```bash
+# 克隆 emsdk
+git clone https://github.com/emscripten-core/emsdk.git
+cd emsdk
+git pull
+
+# 安装并激活 4.0.23 版本
+./emsdk install 4.0.23
+./emsdk activate 4.0.23
+
+# 激活环境变量（每次新终端都需要执行）
+source ./emsdk_env.sh
+
+# 验证安装
+emcc --version
+```
+
+<Warning>
+构建脚本会验证 `$EMSCRIPTEN/cmake/Modules/Platform/Emscripten.cmake` 是否存在。如果找不到该文件，请确认 `source ./emsdk_env.sh` 已正确执行，且 `EMSCRIPTEN` 环境变量指向正确路径。
+</Warning>
+
+### 执行 KWS WASM 编译
+
+```bash
+# 克隆 sherpa-onnx 仓库
+git clone https://github.com/k2-fsa/sherpa-onnx.git
+cd sherpa-onnx
+
+# 执行 KWS 专用 WASM 构建脚本
+./build-wasm-simd-kws.sh
+```
+
+### 关键编译选项说明
+
+`build-wasm-simd-kws.sh` 中的核心 CMake 参数：
+
+| CMake 参数 | 值 | 说明 |
+|------------|----|------|
+| `SHERPA_ONNX_ENABLE_WASM` | `ON` | 启用 WASM 构建模式 |
+| `SHERPA_ONNX_ENABLE_WASM_KWS` | `ON` | 启用 KWS 专用 WASM 目标（生成 KWS JS/WASM 文件） |
+| `SHERPA_ONNX_ENABLE_C_API` | `ON` | 通过 C API 暴露接口给 JavaScript |
+| `BUILD_SHARED_LIBS` | `OFF` | 静态链接，生成单一 `.wasm` 文件 |
+| `SHERPA_ONNX_ENABLE_TTS` | `OFF` | 关闭 TTS 减小体积 |
+| `SHERPA_ONNX_ENABLE_GPU` | `OFF` | WASM 不支持 GPU provider |
+| `SHERPA_ONNX_ENABLE_PORTAUDIO` | `OFF` | 浏览器使用 Web Audio API |
+
+编译完成后产物位于 `build-wasm-simd-kws/install/bin/wasm/`：
+
+```text
+install/bin/wasm/
+├── sherpa-onnx-kws.js       # Emscripten 生成的 JS 胶水代码
+├── sherpa-onnx-kws.wasm     # 编译好的 WebAssembly 二进制
+└── sherpa-onnx-kws.data     # （可选）预打包的数据文件
+```
+
+---
+
+## 浏览器兼容性
+
+### 必要的浏览器特性
+
+WASM KWS 版本需要浏览器支持以下特性：
+
+| 特性 | 用途 | 支持情况 |
+|------|------|----------|
+| **WebAssembly SIMD** | 加速矩阵运算 | Chrome 91+、Firefox 90+、Safari 16.4+ |
+| **SharedArrayBuffer** | 多线程内存共享（ONNX Runtime WASM 线程池） | 需要 COOP/COEP 响应头 |
+| **Web Audio API / AudioWorklet** | 从麦克风捕获音频 | 所有现代浏览器 |
+
+### 必须设置的 HTTP 响应头
+
+<Warning>
+`SharedArrayBuffer` 在现代浏览器中要求页面处于**跨域隔离（cross-origin isolated）**状态。必须在你的 Web 服务器上为 HTML 页面设置以下两个 HTTP 响应头，否则 `SharedArrayBuffer` 将不可用，WASM 模块的多线程功能无法初始化：
+
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+如果你使用 Nginx，配置示例如下：
+
+```nginx
+location / {
+    add_header Cross-Origin-Opener-Policy  "same-origin";
+    add_header Cross-Origin-Embedder-Policy "require-corp";
+}
+```
+
+如果你使用 Express.js（Node.js）：
+
+```js
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy',  'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  next();
+});
+```
+</Warning>
+
+---
+
+## JavaScript 集成示例
+
+### HTML 页面结构
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>sherpa-onnx KWS 浏览器演示</title>
+</head>
+<body>
+  <h1>关键词唤醒演示</h1>
+  <button id="startBtn">开始监听</button>
+  <button id="stopBtn" disabled>停止</button>
+  <p>检测状态：<span id="status">未启动</span></p>
+  <p>最近检测到：<span id="result">—</span></p>
+
+  <!-- 加载 Emscripten 生成的 JS 胶水代码 -->
+  <script src="./sherpa-onnx-kws.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
+```
+
+### 初始化 WASM 模块并加载模型
+
+```javascript
+// app.js
+
+const MODEL_BASE_URL = './models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/';
+
+let Module;       // Emscripten Module 实例
+let kwsHandle;    // KWS 识别器句柄
+let streamHandle; // OnlineStream 句柄
+let audioContext;
+let mediaStream;
+let processorNode;
+
+/**
+ * 初始化 Emscripten Module 和 KWS 识别器
+ */
+async function initKWS() {
+  document.getElementById('status').textContent = '正在加载 WASM 模块…';
+
+  // 等待 Emscripten Module 初始化完成
+  Module = await createSherpaOnnxKws();
+
+  document.getElementById('status').textContent = '正在加载模型文件…';
+
+  // 将模型文件下载并写入 WASM 虚拟文件系统（MemFS）
+  const modelFiles = [
+    'encoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+    'decoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+    'joiner-epoch-12-avg-2-chunk-16-left-64.onnx',
+    'tokens.txt',
+    'keywords.txt',
+  ];
+
+  for (const filename of modelFiles) {
+    const response = await fetch(MODEL_BASE_URL + filename);
+    const buffer   = await response.arrayBuffer();
+    const data     = new Uint8Array(buffer);
+    // 写入 WASM 虚拟文件系统
+    Module.FS.writeFile('/model/' + filename, data);
+  }
+
+  // 构建 KWS 配置并创建识别器
+  const config = {
+    featConfig: {
+      sampleRate: 16000,
+      featureDim: 80,
+    },
+    modelConfig: {
+      transducer: {
+        encoder: '/model/encoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+        decoder: '/model/decoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+        joiner:  '/model/joiner-epoch-12-avg-2-chunk-16-left-64.onnx',
+      },
+      tokens:     '/model/tokens.txt',
+      numThreads: 1,
+      provider:   'cpu',
+    },
+    keywordsFile:      '/model/keywords.txt',
+    keywordsScore:     1.0,
+    keywordsThreshold: 0.25,
+    numTrailingBlanks: 1,
+  };
+
+  kwsHandle    = Module.createKeywordSpotter(config);
+  streamHandle = Module.createKeywordStream(kwsHandle);
+
+  document.getElementById('status').textContent = '模型就绪，点击「开始监听」';
+}
+
+/**
+ * 启动麦克风捕获并接入 KWS
+ */
+async function startListening() {
+  // 请求麦克风权限
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      sampleRate:  16000,
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+    }
+  });
+
+  audioContext = new AudioContext({ sampleRate: 16000 });
+  const source = audioContext.createMediaStreamSource(mediaStream);
+
+  // 使用 ScriptProcessorNode（兼容性好）捕获原始 PCM 数据
+  // 生产环境建议改用 AudioWorklet 以避免主线程阻塞
+  processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+  processorNode.onaudioprocess = (event) => {
+    const inputData = event.inputBuffer.getChannelData(0); // Float32Array
+
+    // 将音频数据送入 KWS
+    Module.acceptWaveform(streamHandle, inputData);
+
+    // 执行解码
+    while (Module.isKeywordStreamReady(kwsHandle, streamHandle)) {
+      Module.decodeKeywordStream(kwsHandle, streamHandle);
+    }
+
+    // 获取检测结果
+    const result = Module.getKeywordResult(kwsHandle, streamHandle);
+    if (result && result.keyword) {
+      document.getElementById('result').textContent =
+        `${result.keyword}（${new Date().toLocaleTimeString()}）`;
+
+      // 立即 reset，防止重复触发
+      Module.resetKeywordStream(kwsHandle, streamHandle);
+    }
+  };
+
+  source.connect(processorNode);
+  processorNode.connect(audioContext.destination);
+
+  document.getElementById('status').textContent = '监听中…';
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled  = false;
+}
+
+function stopListening() {
+  processorNode?.disconnect();
+  mediaStream?.getTracks().forEach(t => t.stop());
+  audioContext?.close();
+
+  document.getElementById('status').textContent = '已停止';
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled  = true;
+}
+
+// 事件绑定
+document.getElementById('startBtn').addEventListener('click', startListening);
+document.getElementById('stopBtn').addEventListener('click', stopListening);
+
+// 页面加载时自动初始化
+window.addEventListener('load', initKWS);
+```
+
+---
+
+## 部署注意事项
+
+### 模型文件服务
+
+模型文件应通过 HTTP 服务器提供，不能直接以 `file://` 协议访问（浏览器会阻止 CORS 请求）。本地开发可使用：
+
+```bash
+# Python 内置 HTTP 服务器（无跨域隔离头，仅用于无 SharedArrayBuffer 场景测试）
+python3 -m http.server 8080
+
+# 推荐：使用支持自定义响应头的简单服务器
+npx serve -p 8080 --cors \
+  --header "Cross-Origin-Opener-Policy: same-origin" \
+  --header "Cross-Origin-Embedder-Policy: require-corp"
+```
+
+### 模型文件缓存
+
+为改善用户体验，可利用 **Cache API** 或 **IndexedDB** 在本地缓存模型文件，避免每次刷新页面重新下载：
+
+```javascript
+async function fetchWithCache(url) {
+  const cache = await caches.open('sherpa-onnx-models-v1');
+  const cached = await cache.match(url);
+  if (cached) return cached.arrayBuffer();
+
+  const response = await fetch(url);
+  // 缓存响应副本
+  cache.put(url, response.clone());
+  return response.arrayBuffer();
+}
+```
+
+---
+
+## 参考链接
+
+- [官方 WASM KWS 在线演示](https://k2-fsa.github.io/sherpa/onnx/kws/wasm.html)
+- [预训练 KWS 模型下载](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)
+- [Emscripten 官方文档](https://emscripten.org/docs/)
+- [SharedArrayBuffer 与跨域隔离说明（MDN）](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements)

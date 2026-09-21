@@ -1,0 +1,124 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Sherpa-ONNX 关键词唤醒 (KWS)",
+  "projectDescription": "sherpa-onnx 是一个跨平台、离线运行的语音处理库，本文档聚焦其关键词唤醒（Keyword Spotting）功能，支持 Python、C/C++、Go、Rust、JavaScript、C#、Dart 等多语言 API。",
+  "theme": "luma",
+  "primaryColor": "#ef7025",
+  "lightColor": "#eec9bc",
+  "darkColor": "#4fa1ab",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "快速入门",
+        "groups": [
+          {
+            "group": "概览",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "核心概念",
+            "pages": [
+              "concepts/kws-overview",
+              "concepts/keywords-file-format",
+              "concepts/config-params"
+            ]
+          },
+          {
+            "group": "预训练模型",
+            "pages": [
+              "models/pretrained-models",
+              "models/download-guide"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "语言 API",
+        "groups": [
+          {
+            "group": "Python",
+            "pages": [
+              "api/python/installation",
+              "api/python/keyword-spotter-class",
+              "api/python/from-file",
+              "api/python/from-microphone"
+            ]
+          },
+          {
+            "group": "C / C++",
+            "pages": [
+              "api/c/c-api",
+              "api/c/cxx-api"
+            ]
+          },
+          {
+            "group": "其他语言",
+            "pages": [
+              "api/other/go",
+              "api/other/rust",
+              "api/other/nodejs",
+              "api/other/csharp",
+              "api/other/dart-flutter"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "进阶指南",
+        "groups": [
+          {
+            "group": "平台部署",
+            "pages": [
+              "guides/android",
+              "guides/ios",
+              "guides/wasm"
+            ]
+          },
+          {
+            "group": "调优与故障排查",
+            "pages": [
+              "guides/tuning",
+              "guides/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "流式 Transducer 模型，低延迟实时唤醒",
+    "支持从文件或麦克风输入音频",
+    "关键词文件灵活配置，支持中文拼音、英文 BPE 等多种词元格式",
+    "每条流可动态追加关键词，无需重建 Spotter 实例",
+    "可调节 keywords_score 与 keywords_threshold 控制灵敏度",
+    "完全离线运行，无需网络连接",
+    "支持 CPU / CUDA / CoreML / OpenVINO 等多种推理后端",
+    "覆盖 Android、iOS、Windows、macOS、Linux、HarmonyOS、WebAssembly 等平台",
+    "提供 Python、C、C++、Go、Rust、Node.js、C#、Dart/Flutter 等 12+ 语言绑定"
+  ],
+  "publicApiSurface": [
+    "KeywordSpotter.__init__(tokens, encoder, decoder, joiner, keywords_file, ...)",
+    "KeywordSpotter.create_stream(keywords=None) -> OnlineStream",
+    "KeywordSpotter.decode_stream(stream)",
+    "KeywordSpotter.decode_streams(streams)",
+    "KeywordSpotter.is_ready(stream) -> bool",
+    "KeywordSpotter.get_result(stream) -> str",
+    "KeywordSpotter.reset_stream(stream)",
+    "SherpaOnnxCreateKeywordSpotter(config) [C API]",
+    "SherpaOnnxCreateKeywordStream(kws) [C API]",
+    "SherpaOnnxCreateKeywordStreamWithKeywords(kws, keywords) [C API]",
+    "SherpaOnnxDecodeKeywordStream(kws, stream) [C API]",
+    "SherpaOnnxIsKeywordStreamReady(kws, stream) [C API]",
+    "SherpaOnnxGetKeywordResult(kws, stream) [C API]",
+    "SherpaOnnxResetKeywordStream(kws, stream) [C API]",
+    "SherpaOnnxDestroyKeywordSpotter(kws) [C API]",
+    "sherpa_onnx.createKws(config) [Node.js]",
+    "KeywordSpotter::create(config) [Rust]",
+    "sherpa.NewKeywordSpotter(config) [Go]",
+    "new KeywordSpotter(config) [C#]",
+    "KeywordSpotter(config) [Dart/Flutter]"
+  ]
+}

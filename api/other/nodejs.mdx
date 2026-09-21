@@ -1,0 +1,288 @@
+---
+title: "sherpa-onnx Node.js 绑定：关键词唤醒（KWS）开发指南"
+sidebarTitle: "Node.js"
+description: "在 Node.js 或 Electron 中集成 sherpa-onnx 关键词唤醒，涵盖 createKws 配置、流式解码循环、内联关键词格式，以及纯 JS 包与原生 Addon 对比。"
+---
+
+sherpa-onnx 提供了两个 Node.js 包，支持在 Node.js 或 Electron 应用中实现离线关键词唤醒（KWS）功能，无需网络连接，可本地实时检测预定义关键词。
+
+## 概述
+
+sherpa-onnx 提供了两个 Node.js 包：
+
+| 包名 | 适用场景 |
+|------|----------|
+| `sherpa-onnx` | 纯 JS/WebAssembly，跨平台，无需原生编译 |
+| `sherpa-onnx-node` | 原生 Node Addon（N-API），性能更高，需平台匹配的预编译二进制 |
+
+本文档以 `sherpa-onnx`（纯 JS）为主，同时提供 `sherpa-onnx-node`（原生 Addon）的等价写法。
+
+---
+
+## 安装
+
+```bash
+# 方式一：纯 JS 包（推荐，开箱即用）
+npm install sherpa-onnx
+
+# 方式二：原生 Node Addon（性能更高）
+npm install sherpa-onnx-node
+```
+
+---
+
+## 下载模型
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+---
+
+## 配置对象结构
+
+```js
+const config = {
+  // 特征提取配置（原生 Addon 需显式指定）
+  featConfig: {
+    sampleRate: 16000,   // 采样率，必须与模型匹配
+    featureDim: 80,      // Fbank 特征维度
+  },
+
+  // 模型配置
+  modelConfig: {
+    transducer: {
+      encoder: 'path/to/encoder.onnx',  // Encoder 模型路径
+      decoder: 'path/to/decoder.onnx',  // Decoder 模型路径
+      joiner:  'path/to/joiner.onnx',   // Joiner 模型路径
+    },
+    tokens:     'path/to/tokens.txt',   // 词表路径
+    numThreads: 1,                       // 推理线程数
+    provider:   'cpu',                   // 推理后端
+    debug:      1,                       // 调试日志（1 开启）
+  },
+
+  // 预定义关键词文件（与 keywords 字段二选一或同时使用）
+  keywordsFile: 'path/to/test_keywords.txt',
+
+  // 内联关键词（可与 keywordsFile 同时使用）
+  // 格式：拼音音素 + @显示标签，多个关键词用换行符 \n 分隔
+  keywords: 'w én s ēn t è k ǎ s uǒ  @文森特卡索\n' +
+            'f ǎ g uó @法国',
+};
+```
+
+### 内联关键词格式说明
+
+`keywords` 字段支持在不修改关键词文件的情况下动态指定关键词：
+
+```
+# 每行一个关键词，音素之间用空格分隔
+# @ 后跟中文显示标签（可选）
+# 多个关键词用换行符 \n 分隔
+w én s ēn t è k ǎ s uǒ  @文森特卡索
+f ǎ g uó @法国
+```
+
+---
+
+## 核心 API
+
+### `sherpa_onnx.createKws(config)` / `new sherpa_onnx.KeywordSpotter(config)`
+
+创建关键词检测器实例。`sherpa-onnx` 包使用 `createKws()`，`sherpa-onnx-node` 包使用 `new KeywordSpotter()`。
+
+### `kws.createStream()`
+
+使用配置中的关键词创建音频输入流。
+
+### `stream.acceptWaveform(sampleRate, samples)` / `stream.acceptWaveform({sampleRate, samples})`
+
+向流中写入 PCM 音频（`Float32Array`，范围 `[-1.0, 1.0]`）。
+
+- `sherpa-onnx`：接受 `(sampleRate, samples)` 两个参数
+- `sherpa-onnx-node`：接受 `{sampleRate, samples}` 对象参数
+
+### `kws.isReady(stream) → boolean`
+
+判断流中是否有足够帧数可执行解码。
+
+### `kws.decode(stream)`
+
+执行一次增量解码。
+
+### `kws.getResult(stream).keyword → string`
+
+获取当前检测到的关键词。未检测到时返回空字符串 `''`。
+
+### `kws.reset(stream)`
+
+**检测到关键词后必须立即调用**，重置流状态以继续监听。
+
+### `stream.free()`
+
+释放流占用的原生内存。
+
+### `kws.free()`
+
+释放检测器占用的原生内存。
+
+---
+
+## 完整示例：`sherpa-onnx`（纯 JS 包）
+
+```js
+// Copyright (c) 2024 Xiaomi Corporation
+const sherpa_onnx = require('sherpa-onnx');
+
+function createKeywordSpotter() {
+  // 请从以下地址下载测试文件：
+  // https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+  const config = {
+    modelConfig: {
+      transducer: {
+        encoder:
+          './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+        decoder:
+          './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+        joiner:
+          './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx',
+      },
+      tokens:
+        './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt',
+    },
+    // 内联关键词：拼音音素 + @显示标签，多个关键词用 \n 分隔
+    keywords: 'w én s ēn t è k ǎ s uǒ  @文森特卡索\n' +
+              'f ǎ g uó @法国',
+  };
+
+  return sherpa_onnx.createKws(config);
+}
+
+const kws = createKeywordSpotter();
+const stream = kws.createStream();
+
+const waveFilename =
+  './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav';
+
+// 读取音频并输入流
+const wave = sherpa_onnx.readWave(waveFilename);
+stream.acceptWaveform(wave.sampleRate, wave.samples);
+
+// 添加尾部静音填充，确保最后几帧被处理
+const tailPadding = new Float32Array(wave.sampleRate * 0.4);
+stream.acceptWaveform(kws.config.featConfig.sampleRate, tailPadding);
+
+// 解码循环
+const detectedKeywords = [];
+while (kws.isReady(stream)) {
+  kws.decode(stream);
+  const keyword = kws.getResult(stream).keyword;
+  if (keyword !== '') {
+    detectedKeywords.push(keyword);
+    // 检测到关键词后立即重置，以便继续监听下一个
+    kws.reset(stream);
+  }
+}
+
+console.log('检测到的关键词：', detectedKeywords);
+
+// 释放资源
+stream.free();
+kws.free();
+```
+
+---
+
+## 完整示例：`sherpa-onnx-node`（原生 Addon）
+
+```js
+// Copyright (c) 2024 Xiaomi Corporation
+const sherpa_onnx = require('sherpa-onnx-node');
+
+// 请从以下地址下载测试文件：
+// https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+const config = {
+  featConfig: {
+    sampleRate: 16000,
+    featureDim: 80,
+  },
+  modelConfig: {
+    transducer: {
+      encoder:
+        './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+      decoder:
+        './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+      joiner:
+        './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx',
+    },
+    tokens:
+      './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt',
+    numThreads: 1,
+    provider: 'cpu',
+    debug: 1,
+  },
+  keywordsFile:
+    './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt',
+};
+
+const waveFilename =
+  './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav';
+
+const kws = new sherpa_onnx.KeywordSpotter(config);
+console.log('已创建 KeywordSpotter');
+
+const start = Date.now();
+const stream = kws.createStream();
+const wave = sherpa_onnx.readWave(waveFilename);
+
+// 注意：原生 Addon 的 acceptWaveform 接受对象参数
+stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: wave.samples });
+
+const tailPadding = new Float32Array(wave.sampleRate * 0.4);
+stream.acceptWaveform({ samples: tailPadding, sampleRate: wave.sampleRate });
+
+const detectedKeywords = [];
+while (kws.isReady(stream)) {
+  kws.decode(stream);
+  const keyword = kws.getResult(stream).keyword;
+  if (keyword !== '') {
+    detectedKeywords.push(keyword);
+  }
+}
+const stop = Date.now();
+
+const elapsedSeconds = (stop - start) / 1000;
+const duration = wave.samples.length / wave.sampleRate;
+const rtf = elapsedSeconds / duration;
+
+console.log('音频时长：', duration.toFixed(3), '秒');
+console.log('处理耗时：', elapsedSeconds.toFixed(3), '秒');
+console.log(`RTF = ${elapsedSeconds.toFixed(3)}/${duration.toFixed(3)} =`, rtf.toFixed(3));
+console.log('检测到的关键词：', detectedKeywords);
+```
+
+<Tip>
+**必须手动释放资源**
+
+使用 `sherpa-onnx`（纯 JS 包）时，流与检测器底层持有原生内存，**Node.js GC 无法自动释放**。请在使用完毕后显式调用：
+
+```js
+stream.free();   // 先释放流
+kws.free();      // 再释放检测器
+```
+
+在 Electron 应用中，建议在窗口关闭事件（`app.on('before-quit')`）中统一释放资源，防止进程退出时出现资源泄漏警告。
+</Tip>
+
+---
+
+## 性能对比
+
+| 包 | RTF（实时因子） | 编译要求 | 适用场景 |
+|----|----------------|----------|----------|
+| `sherpa-onnx` | ~0.05（WASM） | 无需编译 | 快速原型、跨平台部署 |
+| `sherpa-onnx-node` | ~0.02（原生） | 需匹配平台二进制 | 生产环境、低延迟要求 |
+
+RTF 低于 1 表示实时处理，值越小性能越好。

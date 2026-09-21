@@ -1,0 +1,212 @@
+---
+title: "sherpa-onnx KWS 五分钟快速上手：安装、中文模型下载与 Python 关键词检测完整示例"
+sidebarTitle: "快速开始"
+description: "跟随分步教程完成 sherpa-onnx KWS 的安装配置：pip 安装后下载 WenetSpeech 3.3M 中文模型，编写可直接运行的 Python 示例，演示 create_stream、decode_stream、get_result 与 reset_stream 全流程，全程约五分钟。"
+---
+
+本指南以 Python API 为例，带你完成从安装到检测第一个关键词的完整流程。如需其他语言的示例，请参阅「语言 API」章节。
+
+<Steps>
+
+<Step title="安装 sherpa-onnx">
+
+使用 pip 安装预编译的 sherpa-onnx 包（包含所有依赖的 ONNX Runtime）：
+
+<CodeGroup>
+
+```bash macOS / Linux
+pip install sherpa-onnx
+```
+
+```bash Windows (CPU)
+pip install sherpa-onnx
+```
+
+```bash 从源码安装（最新功能）
+git clone https://github.com/k2-fsa/sherpa-onnx
+cd sherpa-onnx
+pip install .
+```
+
+</CodeGroup>
+
+安装完成后验证：
+
+```bash
+python -c "import sherpa_onnx; print(sherpa_onnx.__version__)"
+```
+
+</Step>
+
+<Step title="下载预训练模型">
+
+本示例使用 **wenetspeech** 中文 KWS 模型（3.3M 参数，适合资源受限场景）。
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar -xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+解压后的目录结构如下：
+
+```
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+├── encoder-epoch-12-avg-2-chunk-16-left-64.onnx   # 编码器
+├── decoder-epoch-12-avg-2-chunk-16-left-64.onnx   # 解码器
+├── joiner-epoch-12-avg-2-chunk-16-left-64.onnx    # 连接器
+├── tokens.txt                                      # 词元表
+└── test_wavs/
+    ├── test_keywords.txt                           # 示例关键词文件
+    ├── 1.wav
+    ├── 2.wav
+    └── 3.wav
+```
+
+</Step>
+
+<Step title="准备关键词文件">
+
+关键词文件 `test_keywords.txt` 每行定义一个关键词，使用拼音词元（中文）或 BPE 词元（英文）描述发音，`@` 后跟显示文本。
+
+```text test_keywords.txt
+x iǎo ài t óng x ué @小爱同学
+n í h ǎo x iǎo y uán @你好小苑
+zh ī m íng @知名
+y ǎn y uán @演员
+```
+
+<Note>
+词元（如 `x iǎo`）必须与模型目录中 `tokens.txt` 里的符号**完全一致**。中文关键词使用带声调符号的拼音（如 `ǎ`、`ó`、`ú`），字符之间以空格分隔；英文关键词使用 BPE 词元。`@` 后跟显示文本，多个关键词之间用 `/` 分隔。
+</Note>
+
+</Step>
+
+<Step title="运行关键词检测">
+
+将以下代码保存为 `kws_demo.py`，然后运行：
+
+```python kws_demo.py
+#!/usr/bin/env python3
+"""
+sherpa-onnx 关键词唤醒快速上手示例
+"""
+import wave
+import numpy as np
+import sherpa_onnx
+
+MODEL_DIR = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+
+
+def read_wave(wave_filename: str):
+    """读取 WAV 文件，返回 float32 归一化样本与采样率。"""
+    with wave.open(wave_filename) as f:
+        assert f.getnchannels() == 1, "仅支持单声道音频"
+        assert f.getsampwidth() == 2, "仅支持 16-bit 音频"
+        num_samples = f.getnframes()
+        samples = f.readframes(num_samples)
+        samples_int16 = np.frombuffer(samples, dtype=np.int16)
+        samples_float32 = samples_int16.astype(np.float32) / 32768
+        return samples_float32, f.getframerate()
+
+
+def create_keyword_spotter() -> sherpa_onnx.KeywordSpotter:
+    """初始化 KeywordSpotter，加载模型与关键词文件。"""
+    return sherpa_onnx.KeywordSpotter(
+        tokens=f"{MODEL_DIR}/tokens.txt",
+        encoder=f"{MODEL_DIR}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        decoder=f"{MODEL_DIR}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        joiner=f"{MODEL_DIR}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+        num_threads=2,
+        keywords_file=f"{MODEL_DIR}/test_wavs/test_keywords.txt",
+        provider="cpu",
+    )
+
+
+def main():
+    kws = create_keyword_spotter()
+    wave_file = f"{MODEL_DIR}/test_wavs/3.wav"
+    samples, sample_rate = read_wave(wave_file)
+
+    # 末尾填充静音，确保最后的关键词被完整解码
+    tail_paddings = np.zeros(int(0.66 * sample_rate), dtype=np.float32)
+
+    # ── 场景一：使用预定义关键词文件 ──────────────────────────────
+    print("── 场景一：使用预定义关键词 ──")
+    stream = kws.create_stream()
+    stream.accept_waveform(sample_rate, samples)
+    stream.accept_waveform(sample_rate, tail_paddings)
+    stream.input_finished()
+
+    while kws.is_ready(stream):
+        kws.decode_stream(stream)
+        result = kws.get_result(stream)
+        if result:
+            print(f"  ✅ 检测到关键词：{result}")
+            # 检测到关键词后必须立即 reset，防止重复触发
+            kws.reset_stream(stream)
+
+    # ── 场景二：运行时动态添加关键词 ──────────────────────────────
+    print("\n── 场景二：动态追加关键词「演员」 ──")
+    stream2 = kws.create_stream("y ǎn y uán @演员")
+    stream2.accept_waveform(sample_rate, samples)
+    stream2.accept_waveform(sample_rate, tail_paddings)
+    stream2.input_finished()
+
+    while kws.is_ready(stream2):
+        kws.decode_stream(stream2)
+        result = kws.get_result(stream2)
+        if result:
+            print(f"  ✅ 检测到关键词：{result}")
+            kws.reset_stream(stream2)
+
+    # ── 场景三：同时追加多个关键词（/ 分隔）─────────────────────
+    print("\n── 场景三：同时追加「演员」与「知名」 ──")
+    stream3 = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+    stream3.accept_waveform(sample_rate, samples)
+    stream3.accept_waveform(sample_rate, tail_paddings)
+    stream3.input_finished()
+
+    while kws.is_ready(stream3):
+        kws.decode_stream(stream3)
+        result = kws.get_result(stream3)
+        if result:
+            print(f"  ✅ 检测到关键词：{result}")
+            kws.reset_stream(stream3)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+```bash 执行
+python kws_demo.py
+```
+
+</Step>
+
+</Steps>
+
+## 预期输出
+
+运行成功后，终端将打印类似如下内容（具体关键词取决于音频内容）：
+
+```text
+── 场景一：使用预定义关键词 ──
+  ✅ 检测到关键词：小爱同学
+── 场景二：动态追加关键词「演员」 ──
+  ✅ 检测到关键词：演员
+── 场景三：同时追加「演员」与「知名」 ──
+  ✅ 检测到关键词：演员
+  ✅ 检测到关键词：知名
+```
+
+<Tip>
+  **必须在检测到关键词后立即调用 `kws.reset_stream(stream)`。**
+  流式 Transducer 解码器会持续维护内部状态；若不重置，已匹配的词元路径会继续影响后续帧，导致同一个关键词被**重复触发**。调用 `reset_stream` 可清除当前匹配状态，使解码器从下一帧重新开始监听。
+</Tip>
+
+## 下一步
+
+- 了解 [KWS 工作原理](/concepts/kws-overview)，深入理解流式 Transducer 解码机制
+- 学习 [关键词文件格式](/concepts/keywords-file-format)，编写自定义关键词
+- 查阅 [配置参数详解](/concepts/config-params)，调整检测灵敏度

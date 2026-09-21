@@ -1,0 +1,448 @@
+---
+title: "sherpa-onnx Python KWS：sounddevice 麦克风 100ms 分块实时关键词检测示例"
+sidebarTitle: "麦克风输入"
+description: "演示使用 sherpa-onnx 与 sounddevice 实现麦克风实时关键词唤醒：采用 100ms 分块流式解码，检测到关键词后立即调用 reset_stream，并通过 --keywords-score 和 --keywords-threshold 命令行参数灵活调优。"
+---
+
+本文展示如何使用 `sherpa-onnx` 和 `sounddevice` 库从系统麦克风实时捕获音频，并对流入的音频进行在线关键词检测。程序以 100ms 为单位分块读取麦克风数据，在整个会话期间持续复用同一个解码流，检测到关键词后立即调用 `reset_stream` 清除状态，实现真正的连续流式唤醒检测。
+
+<Note>
+  **音频输入规格要求**
+
+  - 采样率：**16000 Hz（16kHz）**
+  - 声道数：**单声道（Mono）**
+  - 采样格式：**float32**（`sounddevice` 默认输出，`sherpa-onnx` 直接支持）
+
+  如果你的麦克风不支持 16kHz 采样，请在系统音频设置中配置重采样，或使用支持采样率转换的音频库。
+</Note>
+
+---
+
+## 准备工作
+
+### 安装依赖
+
+```bash
+pip install sherpa-onnx
+pip install sounddevice
+```
+
+### 下载预训练模型
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+---
+
+## 命令行参数
+
+麦克风示例通过 `argparse` 支持以下命令行参数：
+
+| 参数                    | 类型    | 默认值   | 说明                                                         |
+| ----------------------- | ------- | -------- | ------------------------------------------------------------ |
+| `--tokens`              | `str`   | —        | `tokens.txt` 文件路径（必填）                                |
+| `--encoder`             | `str`   | —        | Encoder ONNX 模型路径（必填）                                |
+| `--decoder`             | `str`   | —        | Decoder ONNX 模型路径（必填）                                |
+| `--joiner`              | `str`   | —        | Joiner ONNX 模型路径（必填）                                 |
+| `--keywords-file`       | `str`   | —        | 关键词文件路径（必填）                                       |
+| `--num-threads`         | `int`   | `1`      | 神经网络推理线程数                                           |
+| `--provider`            | `str`   | `"cpu"`  | 推理后端：`cpu`、`cuda`、`coreml`                            |
+| `--max-active-paths`    | `int`   | `4`      | Beam Search 最大活跃路径数                                   |
+| `--num-trailing-blanks` | `int`   | `1`      | 触发关键词后需跟随的空白帧数，共享前缀时建议设为 `8`         |
+| `--keywords-score`      | `float` | `1.0`    | 关键词 Token 的 Boosting 分数，越大越易触发                  |
+| `--keywords-threshold`  | `float` | `0.25`   | 触发概率阈值，越大越难触发                                   |
+
+### 运行命令示例
+
+```bash
+python keyword-spotter-from-microphone.py \
+  --tokens ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt \
+  --encoder ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx \
+  --decoder ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx \
+  --joiner ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx \
+  --keywords-file ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt \
+  --num-threads 1 \
+  --provider cpu
+```
+
+---
+
+## 完整示例代码
+
+```python
+#!/usr/bin/env python3
+
+# Real-time keyword spotting from a microphone with sherpa-onnx Python API
+#
+# Please refer to
+# https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html
+# to download pre-trained models
+
+import argparse
+import sys
+from pathlib import Path
+from typing import List
+
+try:
+    import sounddevice as sd
+except ImportError:
+    print("Please install sounddevice first. You can use")
+    print()
+    print("  pip install sounddevice")
+    print()
+    print("to install it")
+    sys.exit(-1)
+
+import sherpa_onnx
+
+
+def assert_file_exists(filename: str):
+    assert Path(filename).is_file(), (
+        f"{filename} does not exist!\n"
+        "Please refer to "
+        "https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html to download it"
+    )
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument(
+        "--tokens",
+        type=str,
+        help="Path to tokens.txt",
+    )
+
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        help="Path to the transducer encoder model",
+    )
+
+    parser.add_argument(
+        "--decoder",
+        type=str,
+        help="Path to the transducer decoder model",
+    )
+
+    parser.add_argument(
+        "--joiner",
+        type=str,
+        help="Path to the transducer joiner model",
+    )
+
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=1,
+        help="Number of threads for neural network computation",
+    )
+
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="cpu",
+        help="Valid values: cpu, cuda, coreml",
+    )
+
+    parser.add_argument(
+        "--max-active-paths",
+        type=int,
+        default=4,
+        help="""
+        It specifies number of active paths to keep during decoding.
+        """,
+    )
+
+    parser.add_argument(
+        "--num-trailing-blanks",
+        type=int,
+        default=1,
+        help="""The number of trailing blanks a keyword should be followed. Setting
+        to a larger value (e.g. 8) when your keywords has overlapping tokens
+        between each other.
+        """,
+    )
+
+    parser.add_argument(
+        "--keywords-file",
+        type=str,
+        help="""
+        The file containing keywords, one words/phrases per line, and for each
+        phrase the bpe/cjkchar/pinyin are separated by a space. For example:
+
+        ▁HE LL O ▁WORLD
+        x iǎo ài t óng x ué
+        """,
+    )
+
+    parser.add_argument(
+        "--keywords-score",
+        type=float,
+        default=1.0,
+        help="""
+        The boosting score of each token for keywords. The larger the easier to
+        survive beam search.
+        """,
+    )
+
+    parser.add_argument(
+        "--keywords-threshold",
+        type=float,
+        default=0.25,
+        help="""
+        The trigger threshold (i.e. probability) of the keyword. The larger the
+        harder to trigger.
+        """,
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = get_args()
+
+    devices = sd.query_devices()
+    if len(devices) == 0:
+        print("No microphone devices found")
+        sys.exit(0)
+
+    print(devices)
+    default_input_device_idx = sd.default.device[0]
+    print(f'Use default device: {devices[default_input_device_idx]["name"]}')
+
+    assert_file_exists(args.tokens)
+    assert_file_exists(args.encoder)
+    assert_file_exists(args.decoder)
+    assert_file_exists(args.joiner)
+
+    assert Path(
+        args.keywords_file
+    ).is_file(), (
+        f"keywords_file : {args.keywords_file} not exist, please provide a valid path."
+    )
+
+    keyword_spotter = sherpa_onnx.KeywordSpotter(
+        tokens=args.tokens,
+        encoder=args.encoder,
+        decoder=args.decoder,
+        joiner=args.joiner,
+        num_threads=args.num_threads,
+        max_active_paths=args.max_active_paths,
+        keywords_file=args.keywords_file,
+        keywords_score=args.keywords_score,
+        keywords_threshold=args.keywords_threshold,
+        num_trailing_blanks=args.num_trailing_blanks,
+        provider=args.provider,
+    )
+
+    print("Started! Please speak")
+
+    idx = 0
+
+    sample_rate = 16000
+    samples_per_read = int(0.1 * sample_rate)  # 0.1 second = 100 ms
+    stream = keyword_spotter.create_stream()
+    with sd.InputStream(channels=1, dtype="float32", samplerate=sample_rate) as s:
+        while True:
+            samples, _ = s.read(samples_per_read)  # a blocking read
+            samples = samples.reshape(-1)
+            stream.accept_waveform(sample_rate, samples)
+            while keyword_spotter.is_ready(stream):
+                keyword_spotter.decode_stream(stream)
+                result = keyword_spotter.get_result(stream)
+                if result:
+                    print(f"{idx}: {result}")
+                    idx += 1
+                    # Remember to reset stream right after detecting a keyword
+                    keyword_spotter.reset_stream(stream)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCaught Ctrl + C. Exiting")
+```
+
+---
+
+## 实时检测流程详解
+
+<Steps>
+  <Step title="检查并选择麦克风设备">
+    程序启动时，使用 `sounddevice.query_devices()` 列出系统中所有可用的音频输入/输出设备，并自动选择系统默认的输入设备：
+
+    ```python
+    import sounddevice as sd
+
+    devices = sd.query_devices()
+    print(devices)  # 列出所有设备
+
+    default_input_device_idx = sd.default.device[0]
+    print(f'Use default device: {devices[default_input_device_idx]["name"]}')
+    ```
+
+    示例输出：
+    ```text
+      0 MacBook Pro Microphone, Core Audio (1 in, 0 out)
+    > 1 MacBook Pro Speakers, Core Audio (0 in, 2 out)
+    Use default device: MacBook Pro Microphone
+    ```
+  </Step>
+
+  <Step title="初始化 KeywordSpotter">
+    使用命令行参数创建 `KeywordSpotter` 实例：
+
+    ```python
+    keyword_spotter = sherpa_onnx.KeywordSpotter(
+        tokens=args.tokens,
+        encoder=args.encoder,
+        decoder=args.decoder,
+        joiner=args.joiner,
+        num_threads=args.num_threads,
+        max_active_paths=args.max_active_paths,
+        keywords_file=args.keywords_file,
+        keywords_score=args.keywords_score,
+        keywords_threshold=args.keywords_threshold,
+        num_trailing_blanks=args.num_trailing_blanks,
+        provider=args.provider,
+    )
+    ```
+
+    与文件输入不同，实时检测只需创建**一个流**，在整个会话期间持续复用：
+
+    ```python
+    stream = keyword_spotter.create_stream()
+    ```
+  </Step>
+
+  <Step title="打开麦克风输入流">
+    使用 `sounddevice.InputStream` 以 16kHz 单声道 float32 格式打开麦克风：
+
+    ```python
+    sample_rate = 16000
+    samples_per_read = int(0.1 * sample_rate)  # 每次读取 100ms = 1600 个样本点
+
+    with sd.InputStream(channels=1, dtype="float32", samplerate=sample_rate) as s:
+        ...
+    ```
+
+    <Note>
+      **16kHz 单声道要求**
+
+      `sd.InputStream` 配置为 `samplerate=16000`、`channels=1`，这与 `sherpa-onnx` 预训练模型的训练数据规格完全匹配。若使用其他采样率，模型的 Fbank 特征提取结果将不准确，导致检测率下降。
+    </Note>
+  </Step>
+
+  <Step title="100ms 分块读取音频">
+    在主循环中，每次从麦克风阻塞读取 100ms 的音频数据（1600 个采样点），并立即喂入解码流：
+
+    ```python
+    while True:
+        samples, _ = s.read(samples_per_read)  # 阻塞读取，等待 100ms 数据就绪
+        samples = samples.reshape(-1)           # 将 (1600, 1) 形状展平为 (1600,)
+        stream.accept_waveform(sample_rate, samples)
+    ```
+
+    **100ms 分块的设计考量：**
+
+    - 延迟与吞吐的平衡：分块太小（如 10ms）会导致系统调用频繁、CPU 占用高；分块太大（如 1s）会引入明显的检测延迟。100ms 是常见的工程折中值。
+    - `s.read()` 是**阻塞调用**，会等待足够的样本点积累后才返回，天然起到节流作用，无需额外的 `sleep`。
+  </Step>
+
+  <Step title="实时解码并处理结果">
+    每次喂入音频后，立即消耗所有可解码帧，并检查是否触发了关键词：
+
+    ```python
+    while keyword_spotter.is_ready(stream):
+        keyword_spotter.decode_stream(stream)
+        result = keyword_spotter.get_result(stream)
+        if result:
+            print(f"{idx}: {result}")
+            idx += 1
+            # Remember to reset stream right after detecting a keyword
+            keyword_spotter.reset_stream(stream)
+    ```
+
+    **重要：检测到关键词后必须立即调用 `reset_stream`。**
+
+    如果不重置，`get_result` 在后续的每次解码循环中都会返回同一关键词，触发大量重复事件。`reset_stream` 会清除已检测状态，使流准备好检测下一个关键词，同时**保留流的 Encoder 内部状态**，无需重新初始化，实现真正的流式连续检测。
+  </Step>
+
+  <Step title="优雅退出（Ctrl+C）">
+    程序通过捕获 `KeyboardInterrupt` 实现优雅退出：
+
+    ```python
+    if __name__ == "__main__":
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("\nCaught Ctrl + C. Exiting")
+    ```
+
+    `sd.InputStream` 作为上下文管理器，退出时会自动关闭麦克风设备，无需手动清理资源。
+  </Step>
+</Steps>
+
+---
+
+## 预期运行输出
+
+程序启动后，终端输出如下（随后进入等待状态，持续监听麦克风）：
+
+```text
+  0 MacBook Pro Microphone, Core Audio (1 in, 0 out)
+> 1 MacBook Pro Speakers, Core Audio (0 in, 2 out)
+  2 USB Audio Device, Core Audio (1 in, 2 out)
+Use default device: MacBook Pro Microphone
+Started! Please speak
+```
+
+当说出关键词时，终端实时打印（带序号）：
+
+```text
+0: 小爱同学
+1: 小爱同学
+2: 小爱同学
+```
+
+按 `Ctrl+C` 停止：
+
+```text
+^C
+Caught Ctrl + C. Exiting
+```
+
+---
+
+## 常见问题
+
+**Q：运行时报 `No microphone devices found`？**
+
+A：请检查系统麦克风权限设置（macOS 需在"系统设置 → 隐私与安全 → 麦克风"中授权终端）。
+
+**Q：检测延迟较高？**
+
+A：100ms 是分块读取的固有延迟。若需降低延迟，可将 `samples_per_read` 减小（如 `0.05 * sample_rate`，即 50ms），但 CPU 占用会相应升高。
+
+**Q：误报率较高，总是误触发关键词？**
+
+A：适当提高 `--keywords-threshold`（如 `0.35`、`0.5`）可以减少误报；也可降低 `--keywords-score`（如 `0.7`）。
+
+**Q：漏报率较高，说了关键词却没有触发？**
+
+A：适当降低 `--keywords-threshold`（如 `0.15`）或提高 `--keywords-score`（如 `1.5`）可以提高召回率。
+
+---
+
+## 相关链接
+
+- [安装 sherpa-onnx Python 包](/api/python/installation)
+- [KeywordSpotter 类 API 参考](/api/python/keyword-spotter-class)
+- [从音频文件检测关键词](/api/python/from-file)
+- [预训练模型列表](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)

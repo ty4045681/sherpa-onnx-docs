@@ -1,0 +1,394 @@
+---
+title: "Android 平台集成 sherpa-onnx KWS 关键词唤醒功能完整开发指南"
+sidebarTitle: "Android"
+description: "在 Android 应用中集成 sherpa-onnx 离线关键词唤醒（KWS），涵盖 AAR/JitPack 依赖配置、JNI 库编译、模型资源打包到 assets、RECORD_AUDIO 权限申请，以及基于 Kotlin 协程的实时麦克风唤醒完整代码示例。"
+---
+
+sherpa-onnx 为 Android 平台提供完整的关键词唤醒（KWS）支持，支持 arm64-v8a、armeabi-v7a、x86_64 和 x86 四种 CPU 架构，最低兼容 Android API 21（Android 5.0 Lollipop）。官方维护的示例项目位于 `android/SherpaOnnxKws`，并提供了[预编译 APK](https://k2-fsa.github.io/sherpa/onnx/kws/apk.html) 供快速体验。
+
+### 支持的 CPU 架构
+
+| 架构 | 说明 |
+|------|------|
+| `arm64-v8a` | 主流现代手机，**首选** |
+| `armeabi-v7a` | 32 位旧设备兼容 |
+| `x86_64` | Android 模拟器（64 位） |
+| `x86` | Android 模拟器（32 位） |
+
+### 最低系统要求
+
+- Android API Level **21**（Android 5.0 Lollipop）及以上
+- Android NDK（如需从源码编译）
+
+---
+
+## 集成方式一：使用预编译 AAR 包（推荐）
+
+这是最简单的集成方式，无需安装 NDK 或手动编译。
+
+### 1. 配置 JitPack 仓库
+
+在项目根目录的 `settings.gradle`（或 `build.gradle`）中添加 JitPack 仓库：
+
+```groovy
+// settings.gradle (新版 AGP)
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jitpack.io' }
+    }
+}
+```
+
+或者旧版 `build.gradle`（项目级）：
+
+```groovy
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jitpack.io' }
+    }
+}
+```
+
+### 2. 添加依赖
+
+在 app 模块的 `build.gradle` 中添加：
+
+```groovy
+dependencies {
+    // 替换 VERSION_TAG 为最新发布版本，例如 1.10.30
+    implementation 'com.github.k2-fsa:sherpa-onnx:VERSION_TAG'
+}
+```
+
+如果使用 Kotlin DSL（`build.gradle.kts`）：
+
+```kotlin
+dependencies {
+    implementation("com.github.k2-fsa:sherpa-onnx:VERSION_TAG")
+}
+```
+
+<Warning>
+模型文件体积较大（通常 30MB 至 100MB 以上）。强烈建议使用带 `-mobile` 或 `-int8` 后缀的 int8 量化模型，它可将模型体积缩减约 50%，同时在手机 CPU 上的推理速度通常更快。例如：`sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01` 完整版约 13MB，已是轻量级选择。
+</Warning>
+
+---
+
+## 集成方式二：从源码编译
+
+如果你需要定制编译选项，可以手动编译 JNI 库。
+
+### 前置条件
+
+- 已安装 Android SDK 和 NDK
+- 设置环境变量 `ANDROID_NDK` 指向 NDK 路径
+- CMake 3.13 及以上
+
+### 编译步骤（以 arm64-v8a 为例）
+
+```bash
+# 克隆仓库
+git clone https://github.com/k2-fsa/sherpa-onnx.git
+cd sherpa-onnx
+
+# 设置 NDK 路径（替换为你本机的 NDK 实际路径）
+export ANDROID_NDK=/path/to/your/android-sdk/ndk/27.0.11718014
+
+# 执行编译脚本（默认 BUILD_SHARED_LIBS=ON）
+./build-android-arm64-v8a.sh
+```
+
+编译完成后，产物位于 `build-android-arm64-v8a/install/lib/`：
+
+```text
+install/lib/
+├── libonnxruntime.so         # ONNX Runtime 动态库
+└── libsherpa-onnx-jni.so    # sherpa-onnx JNI 接口库
+```
+
+将这两个 `.so` 文件复制到你的 Android 项目中：
+
+```text
+app/src/main/jniLibs/arm64-v8a/
+├── libonnxruntime.so
+└── libsherpa-onnx-jni.so
+```
+
+<Tip>
+若希望只分发一个 `.so` 文件，可以使用静态链接模式编译：
+```bash
+BUILD_SHARED_LIBS=OFF ./build-android-arm64-v8a.sh
+```
+静态模式下 ONNX Runtime 会被链接进 `libsherpa-onnx-jni.so`，只需复制该一个文件即可。
+</Tip>
+
+---
+
+## 模型文件打包
+
+将模型文件放入 `assets/` 目录，Android 会自动将其打包进 APK：
+
+```text
+app/src/main/assets/
+└── sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+    ├── encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+    ├── decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+    ├── joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+    ├── tokens.txt
+    └── keywords.txt
+```
+
+由于 `assets` 中的文件不能直接用文件路径访问，需要在运行时将其复制到应用私有目录：
+
+```kotlin
+/**
+ * 将 assets 目录下的文件复制到 filesDir，返回目标路径
+ */
+fun copyAssetToFilesDir(context: Context, assetPath: String): String {
+    val destFile = File(context.filesDir, assetPath)
+    if (!destFile.exists()) {
+        destFile.parentFile?.mkdirs()
+        context.assets.open(assetPath).use { input ->
+            destFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+    }
+    return destFile.absolutePath
+}
+```
+
+---
+
+## 麦克风权限配置
+
+在 `AndroidManifest.xml` 中声明所需权限：
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 录音权限（必须） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- 可选：声明使用麦克风硬件特性 -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
+    <application ... >
+        ...
+    </application>
+</manifest>
+```
+
+在 Android 6.0（API 23）及以上还需在运行时请求权限：
+
+```kotlin
+// 检查并请求录音权限
+private fun checkAndRequestMicrophonePermission() {
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        != PackageManager.PERMISSION_GRANTED
+    ) {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.RECORD_AUDIO),
+            REQUEST_CODE_RECORD_AUDIO
+        )
+    } else {
+        startKeywordSpotting()
+    }
+}
+```
+
+---
+
+## Java/Kotlin 代码示例
+
+### 初始化 KeywordSpotter
+
+```kotlin
+import com.k2fsa.sherpa.onnx.*
+
+class KwsManager(private val context: Context) {
+
+    private lateinit var kws: KeywordSpotter
+    private lateinit var stream: OnlineStream
+
+    fun init() {
+        val modelDir = copyModelToFilesDir()  // 将 assets 模型复制到 filesDir
+
+        // 配置特征提取器
+        val featConfig = FeatureConfig(
+            sampleRate = 16000,
+            featureDim = 80
+        )
+
+        // 配置模型路径
+        val modelConfig = OnlineTransducerModelConfig(
+            encoder = "$modelDir/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+            decoder = "$modelDir/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+            joiner  = "$modelDir/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+        )
+
+        val onlineModelConfig = OnlineModelConfig(
+            transducer = modelConfig,
+            tokens = "$modelDir/tokens.txt",
+            numThreads = 1,
+            provider = "cpu",
+        )
+
+        // 配置 KeywordSpotter
+        val kwsConfig = KeywordSpotterConfig(
+            featConfig        = featConfig,
+            modelConfig       = onlineModelConfig,
+            keywordsFile      = "$modelDir/keywords.txt",
+            keywordsScore     = 1.0f,
+            keywordsThreshold = 0.25f,
+            numTrailingBlanks = 1,
+        )
+
+        kws    = KeywordSpotter(assetManager = null, config = kwsConfig)
+        stream = kws.createStream()
+    }
+
+    fun release() {
+        stream.release()
+        kws.release()
+    }
+}
+```
+
+### 实时麦克风唤醒
+
+<Tip>
+解码循环应在独立的后台线程（如 `HandlerThread` 或协程 IO 调度器）中运行，避免阻塞 UI 主线程导致界面卡顿。
+</Tip>
+
+```kotlin
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import kotlinx.coroutines.*
+
+class MicrophoneKwsRunner(
+    private val kws: KeywordSpotter,
+    private val onKeywordDetected: (String) -> Unit
+) {
+    private val sampleRate   = 16000
+    private val chunkSize    = 512  // 每次读取的采样点数（约 32ms）
+    private var isRunning    = false
+    private var job: Job?    = null
+
+    fun start() {
+        isRunning = true
+        job = CoroutineScope(Dispatchers.IO).launch {
+            val stream = kws.createStream()
+            val bufferSize = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+
+            val audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+
+            val buffer = ShortArray(chunkSize)
+            audioRecord.startRecording()
+
+            try {
+                while (isRunning) {
+                    val readCount = audioRecord.read(buffer, 0, chunkSize)
+                    if (readCount > 0) {
+                        // 将 short 转换为 float 并送入流
+                        val floatSamples = FloatArray(readCount) {
+                            buffer[it] / 32768.0f
+                        }
+                        stream.acceptWaveform(floatSamples, sampleRate = sampleRate)
+
+                        // 解码并检查结果
+                        while (kws.isReady(stream)) {
+                            kws.decode(stream)
+                        }
+                        val result = kws.getResult(stream)
+                        if (result.keyword.isNotEmpty()) {
+                            // 检测到关键词后立即 reset，防止重复触发
+                            kws.reset(stream)
+                            withContext(Dispatchers.Main) {
+                                onKeywordDetected(result.keyword)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                audioRecord.stop()
+                audioRecord.release()
+                stream.release()
+            }
+        }
+    }
+
+    fun stop() {
+        isRunning = false
+        job?.cancel()
+    }
+}
+```
+
+### 在 Activity 中使用
+
+```kotlin
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var kwsManager: KwsManager
+    private var micRunner: MicrophoneKwsRunner? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        // 初始化（建议在子线程或 ViewModel 中执行）
+        CoroutineScope(Dispatchers.IO).launch {
+            kwsManager = KwsManager(this@MainActivity)
+            kwsManager.init()
+
+            micRunner = MicrophoneKwsRunner(kwsManager.kws) { keyword ->
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "检测到关键词：$keyword",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            micRunner?.start()
+        }
+
+        checkAndRequestMicrophonePermission()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        micRunner?.stop()
+        kwsManager.release()
+    }
+}
+```
+
+---
+
+## 参考链接
+
+- [官方 Android KWS 示例（SherpaOnnxKws）](https://github.com/k2-fsa/sherpa-onnx/tree/master/android/SherpaOnnxKws)
+- [预训练 KWS 模型下载](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)
+- [预编译 APK 演示](https://k2-fsa.github.io/sherpa/onnx/kws/apk.html)
+- [F-Droid 可复现构建说明](https://github.com/k2-fsa/sherpa-onnx/blob/master/android/fdroid-reproducible-builds.md)

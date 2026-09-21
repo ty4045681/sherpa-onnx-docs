@@ -1,0 +1,113 @@
+---
+title: "Sherpa-ONNX KWS 关键词唤醒引擎：跨平台离线流式语音触发技术的核心特性、平台支持与使用场景"
+sidebarTitle: "简介"
+description: "深入了解 sherpa-onnx 关键词唤醒（KWS）的核心能力：完全离线推理、流式低延迟解码、12 种语言 API 绑定（Python、C、C++、Go、Rust、Node.js、C#、Dart 等）、7 大平台部署支持，以及智能家居、车载、移动端典型应用场景全览。"
+---
+
+关键词唤醒（Keyword Spotting，KWS）是指设备持续监听音频流，一旦检测到预先设定的触发词（如「你好小爱」「Hey Siri」等），便立即唤醒后续处理流程的技术。sherpa-onnx KWS 基于流式 Transducer 模型构建，支持 12 种编程语言绑定与 7 大操作平台，所有推理均在本地完成，无需联网。
+
+## 什么是关键词唤醒？
+
+sherpa-onnx KWS 具备以下核心特点：
+
+- **完全离线**：所有推理在本地完成，无需联网，杜绝音频数据外传，充分保护用户隐私。
+- **低延迟**：流式解码架构逐帧处理，典型端到端延迟在百毫秒量级，满足实时交互需求。
+- **多语言绑定**：提供丰富的官方语言 API，开发者可直接在熟悉的语言栈中集成，无需额外封装。
+- **跨平台**：同一套模型可无缝部署于移动端、桌面端、嵌入式设备及浏览器，一次训练、随处运行。
+
+<Note>
+  sherpa-onnx KWS **完全离线运行**，所有音频数据仅在本地处理，不会上传到任何服务器。这是保护终端用户隐私的重要设计原则。
+</Note>
+
+---
+
+## 支持的编程语言
+
+sherpa-onnx 提供 12 种编程语言的官方绑定，以及 WebAssembly 支持，覆盖从嵌入式系统到桌面端、移动端和浏览器的全栈场景。
+
+<CardGroup cols={4}>
+  <Card title="Python" icon="python">
+    最完整的 API，适合快速原型与服务端部署
+  </Card>
+  <Card title="C" icon="c">
+    轻量级 C API，适合嵌入式与资源受限环境
+  </Card>
+  <Card title="C++" icon="code">
+    高性能 C++ API，可直接调用底层接口
+  </Card>
+  <Card title="JavaScript" icon="js">
+    Node.js 绑定，适合 Electron 及 Node 后端
+  </Card>
+  <Card title="Java" icon="java">
+    Java 绑定，适合 Android 及 JVM 服务端
+  </Card>
+  <Card title="C# (.NET)" icon="microsoft">
+    .NET 绑定，适合 Windows 应用与 Unity 游戏
+  </Card>
+  <Card title="Kotlin" icon="code">
+    Kotlin 绑定，适合 Android 原生开发
+  </Card>
+  <Card title="Swift" icon="apple">
+    Swift 绑定，适合 iOS / macOS 原生开发
+  </Card>
+  <Card title="Go" icon="golang">
+    Go 语言绑定，适合云原生后端服务
+  </Card>
+  <Card title="Dart / Flutter" icon="mobile">
+    Flutter 跨平台移动应用首选方案
+  </Card>
+  <Card title="Rust" icon="rust">
+    Rust 绑定，内存安全的系统级集成
+  </Card>
+  <Card title="Pascal" icon="code">
+    Object Pascal 绑定，适合 Delphi / Lazarus 桌面应用
+  </Card>
+</CardGroup>
+
+除以上 12 种语言外，sherpa-onnx 还支持 **WebAssembly**，可在浏览器中纯前端、完全离线地运行关键词检测。
+
+---
+
+## 支持的平台
+
+| 平台 | 架构 | 说明 |
+|------|------|------|
+| **Android** | arm64-v8a、armeabi-v7a、x86、x86\_64 | 支持通过 Java/Kotlin 或 Flutter 调用 |
+| **iOS** | arm64、x86\_64（模拟器） | 支持 Swift、Objective-C 及 Flutter |
+| **Windows** | x64、x86 | 支持 CUDA 加速（需 NVIDIA GPU） |
+| **macOS** | x64、Apple Silicon (arm64) | 支持 CoreML 加速 |
+| **Linux** | x64、aarch64、armv7l | 支持 CUDA / ROCm 加速 |
+| **HarmonyOS** | arm64-v8a | 通过 ArkTS/C API 集成 |
+| **WebAssembly** | wasm32 | 在浏览器中纯前端离线运行 |
+
+---
+
+## 典型使用场景
+
+### 🏠 智能家居唤醒词
+
+在智能音箱、家用机器人等设备上持续监听唤醒词（如「天猫精灵」「叮咚叮咚」），触发后再启动完整的 ASR 识别流程，大幅降低功耗与计算开销。
+
+### 🚗 车载语音控制
+
+车机系统集成 KWS 后，驾驶员无需触屏，通过「导航回家」「打开空调」等固定指令即可完成操作，提升驾驶安全性。
+
+### 🎙️ 会议室语音命令
+
+会议系统通过预设指令词（如「开始录制」「截图」「下一页」）实现免触控操作，让会议流程更顺畅。
+
+### 📱 移动应用无障碍访问
+
+为行动不便的用户提供语音唤醒入口，通过关键词触发应用功能，降低操作门槛。
+
+### 🌐 浏览器端离线唤醒
+
+基于 WebAssembly 构建，无需插件，在浏览器中直接实现完全离线的关键词检测，适用于 Web 应用的隐私敏感场景。
+
+---
+
+## 下一步
+
+<Card title="五分钟快速上手" icon="rocket" href="/quickstart">
+  跟随分步指南，从安装到检测第一个关键词，全程约五分钟。
+</Card>

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Sherpa-ONNX KWS 文档",
+  "theme": "luma",
+  "colors": {
+    "primary": "#ef7025",
+    "light": "#eec9bc",
+    "dark": "#4fa1ab"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "快速入门",
+        "groups": [
+          {
+            "group": "概览",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "核心概念",
+            "pages": [
+              "concepts/kws-overview",
+              "concepts/keywords-file-format",
+              "concepts/config-params"
+            ]
+          },
+          {
+            "group": "预训练模型",
+            "pages": [
+              "models/pretrained-models",
+              "models/download-guide"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "语言 API",
+        "groups": [
+          {
+            "group": "Python",
+            "pages": [
+              "api/python/installation",
+              "api/python/keyword-spotter-class",
+              "api/python/from-file",
+              "api/python/from-microphone"
+            ]
+          },
+          {
+            "group": "C / C++",
+            "pages": [
+              "api/c/c-api",
+              "api/c/cxx-api"
+            ]
+          },
+          {
+            "group": "其他语言",
+            "pages": [
+              "api/other/go",
+              "api/other/rust",
+              "api/other/nodejs",
+              "api/other/csharp",
+              "api/other/dart-flutter"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "进阶指南",
+        "groups": [
+          {
+            "group": "平台部署",
+            "pages": [
+              "guides/android",
+              "guides/ios",
+              "guides/wasm"
+            ]
+          },
+          {
+            "group": "调优与故障排查",
+            "pages": [
+              "guides/tuning",
+              "guides/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/k2-fsa/sherpa-onnx"
+    }
+  }
+}

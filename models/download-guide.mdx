@@ -1,0 +1,279 @@
+---
+title: "sherpa-onnx KWS 预训练模型下载指南：wget/curl 命令与文件完整性验证"
+sidebarTitle: "下载指南"
+description: "分步讲解如何使用 wget 或 curl 从 GitHub Releases 下载 sherpa-onnx KWS 预训练模型，涵盖中文 WenetSpeech 和英文 GigaSpeech 标准版与移动端（-mobile）版本，并通过文件结构验证确认下载完整性。"
+---
+
+本指南以**中文模型（WenetSpeech）**为主线示例，英文模型（GigaSpeech）操作完全相同，只需替换对应的模型名称即可。
+
+<Tip>
+如果你只是想快速体验 KWS 功能，建议先下载**移动端优化版（`-mobile` 后缀）**，压缩包体积更小，解压更快，适合本地快速验证。等功能调通后再根据实际需求选择完整版或量化版。
+</Tip>
+
+---
+
+<Steps>
+
+<Step title="确认网络环境与下载地址">
+
+所有 KWS 模型均托管在 GitHub Releases，统一标签为 `kws-models`：
+
+```text
+https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+```
+
+在浏览器中打开该页面，可以看到所有可下载的模型压缩包（`.tar.bz2` 格式）。
+
+**可用模型清单：**
+
+| 模型名称 | 语言 | 说明 |
+|---------|------|------|
+| `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2` | 中文 | 标准版（FP32） |
+| `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2` | 中文 | 移动端优化版 |
+| `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2` | 英文 | 标准版（FP32） |
+| `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile.tar.bz2` | 英文 | 移动端优化版 |
+
+<Note>
+如果你的网络无法稳定访问 GitHub，可以通过 [ModelScope 镜像](https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01) 下载中文模型。
+</Note>
+</Step>
+
+<Step title="下载中文模型（WenetSpeech 标准版）">
+
+在终端中执行以下命令下载并解压中文标准版模型：
+
+<CodeGroup>
+
+```bash wget
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+```bash curl
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+</CodeGroup>
+
+解压成功后，终端会输出所有被解包的文件列表，类似：
+
+```text
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/README.md
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/4.wav
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/5.wav
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/6.wav
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt
+```
+
+</Step>
+
+<Step title="（可选）下载英文模型（GigaSpeech 标准版）">
+
+如需英文关键词唤醒能力，可同样方式下载英文模型：
+
+<CodeGroup>
+
+```bash wget
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+```
+
+```bash curl
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+```
+
+</CodeGroup>
+
+<Note>
+英文模型解压后会额外包含 `bpe.model` 文件，这是 SentencePiece BPE 子词分割模型，在英文关键词处理时会用到，请勿删除。
+</Note>
+
+</Step>
+
+<Step title="（可选）下载移动端优化版（-mobile）">
+
+移动端版本压缩包更小、解压更快，适合在 Android / iOS 应用中集成，也适合本地快速调试：
+
+<CodeGroup>
+
+```bash wget（中文移动版）
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+```
+
+```bash wget（英文移动版）
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile.tar.bz2
+```
+
+```bash curl（中文移动版）
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+```
+
+</CodeGroup>
+
+移动端版本的目录结构与标准版一致，文件命名略有不同（encoder 经过裁剪），使用方式完全相同。
+
+</Step>
+
+<Step title="验证文件结构完整性">
+
+使用 `ls -lh` 检查解压目录，确认所有必要文件均已存在：
+
+```bash
+ls -lh sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+```
+
+预期输出（文件大小仅供参考）：
+
+```text
+总计 约 30M
+-rw-r--r-- 1 user group  692B README.md
+-rw-r--r-- 1 user group 1.6K tokens.txt
+-rw-r--r-- 1 user group  12M encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+-rw-r--r-- 1 user group 3.1M encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+-rw-r--r-- 1 user group 660K decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+-rw-r--r-- 1 user group 247K joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+-rw-r--r-- 1 user group  68K joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx
+drwxr-xr-x 2 user group  160 test_wavs/
+```
+
+检查 `test_wavs/` 目录内容：
+
+```bash
+ls -lh sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/
+```
+
+预期输出：
+
+```text
+-rw-r--r-- 1 user group  xxx  3.wav
+-rw-r--r-- 1 user group  xxx  4.wav
+-rw-r--r-- 1 user group  xxx  5.wav
+-rw-r--r-- 1 user group  xxx  6.wav
+-rw-r--r-- 1 user group  xxx  test_keywords.txt
+```
+
+查看预置关键词文件内容：
+
+```bash
+cat sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt
+```
+
+该文件每行定义一个关键词，格式为拼音音素序列（中文模型）或 BPE token 序列（英文模型），例如：
+
+```text
+zh ī m íng @知名
+y ǎn y uán @演员
+```
+
+<Note>
+`test_wavs/test_keywords.txt` 中已预置了若干示例关键词，与 `test_wavs/` 中的测试音频相互对应，可以直接用于快速功能验证，无需自定义关键词即可跑通第一个示例。
+</Note>
+
+</Step>
+
+<Step title="快速验证（运行内置示例）">
+
+下载完成后，可以立即使用 Python API 验证模型是否可以正常工作。确保已安装 `sherpa-onnx` Python 包后执行：
+
+```python
+import sherpa_onnx
+
+model_dir = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+
+# 初始化关键词唤醒器
+kws = sherpa_onnx.KeywordSpotter(
+    tokens=f"{model_dir}/tokens.txt",
+    encoder=f"{model_dir}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+    decoder=f"{model_dir}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+    joiner=f"{model_dir}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+    num_threads=2,
+    keywords_file=f"{model_dir}/test_wavs/test_keywords.txt",
+    provider="cpu",
+)
+
+print("✅ 模型加载成功，KWS 初始化完毕！")
+```
+
+如果不报错并打印成功信息，则说明模型文件完整、环境配置正确。
+
+<Tip>
+如果需要在加载时自定义关键词（无需修改 `test_keywords.txt` 文件），可以在创建流时通过 `kws.create_stream("y ǎn y uán @演员")` 的方式临时追加新关键词。多个关键词之间用 `/` 分隔，例如：`kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")`。
+</Tip>
+
+</Step>
+
+</Steps>
+
+---
+
+## 解压后完整目录结构参考
+
+```text
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+│
+├── encoder-epoch-12-avg-2-chunk-16-left-64.onnx        ← 编码器（FP32，约 12 MB）
+├── encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx   ← 编码器（INT8 量化，约 3 MB）
+├── decoder-epoch-12-avg-2-chunk-16-left-64.onnx        ← 解码器（FP32，约 660 KB）
+├── joiner-epoch-12-avg-2-chunk-16-left-64.onnx         ← Joiner（FP32，约 247 KB）
+├── joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx    ← Joiner（INT8 量化，约 68 KB）
+├── tokens.txt                                          ← 词表（约 1.6 KB，中文字符/音素）
+├── README.md                                           ← 模型说明文档
+│
+└── test_wavs/                                          ← 内置测试资源
+    ├── 3.wav                                           ← 测试音频 1
+    ├── 4.wav                                           ← 测试音频 2
+    ├── 5.wav                                           ← 测试音频 3
+    ├── 6.wav                                           ← 测试音频 4
+    └── test_keywords.txt                               ← 预置关键词列表
+```
+
+英文 GigaSpeech 模型额外包含 `bpe.model`（SentencePiece 子词模型），`test_wavs/` 中的测试音频为 `0.wav` 和 `1.wav`。
+
+---
+
+## 常见问题
+
+<AccordionGroup>
+  <Accordion title="下载速度过慢或连接超时怎么办？">
+    可以尝试以下方法：
+    1. 使用代理或 VPN 访问 GitHub
+    2. 通过 [ModelScope 镜像](https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01) 下载中文模型
+    3. 在 `wget` 命令中添加 `-c` 参数支持断点续传，例如：`wget -c https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2`
+  </Accordion>
+  <Accordion title="解压后提示文件损坏或 tar 报错怎么办？">
+    文件可能在下载过程中不完整，请重新下载。可以通过对比文件大小来初步判断：标准版压缩包应在 8–15 MB 范围内。重新下载前先删除已有的损坏文件：`rm sherpa-onnx-kws-zipformer-*.tar.bz2`
+  </Accordion>
+  <Accordion title="我只需要 int8 量化版，可以不要 FP32 文件吗？">
+    可以。下载解压后，删除 FP32 版 encoder 和 joiner 即可：
+
+    ```bash
+    rm sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+    rm sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+    ```
+
+    在 Python API 中，将对应参数指向 `.int8.onnx` 文件即可，例如 `encoder="...int8.onnx"`。注意 decoder 没有量化版，始终使用 FP32 版。
+  </Accordion>
+  <Accordion title="移动端版本和标准版有什么实质区别？">
+    移动端版本（`-mobile`）的 encoder 经过结构剪枝，层数更少、每层宽度更窄，因此体积和推理延迟都明显低于标准版。代价是在某些复杂场景下召回率可能略低。对于关键词唤醒这类简单任务，两者在日常使用中的差距通常很小。
+  </Accordion>
+</AccordionGroup>

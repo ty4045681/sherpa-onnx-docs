@@ -1,0 +1,262 @@
+---
+title: "sherpa-onnx Go 绑定：关键词唤醒（KWS）快速上手指南"
+sidebarTitle: "Go"
+description: "使用 sherpa-onnx Go 绑定构建关键词唤醒（KWS）应用，涵盖 NewKeywordSpotter 配置、实时流式解码循环、动态追加关键词，以及内存管理最佳实践。"
+---
+
+sherpa-onnx 提供了原生 Go 绑定，让您可以在 Go 程序中直接调用高性能的关键词唤醒（KWS）功能。底层通过 CGO 调用 C 动态库，推理引擎基于 ONNX Runtime，支持 Zipformer Transducer 等多种模型架构。
+
+---
+
+## 安装
+
+```bash
+go get github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx
+```
+
+<Note>
+Go 绑定依赖 CGO。编译前请确保：
+1. 系统已安装 C 编译器（GCC / Clang）。
+2. sherpa-onnx 动态库（`libsherpa-onnx-c-api.so` / `.dylib` / `.dll`）已放置在系统库路径，或通过 `CGO_LDFLAGS` 指定路径。
+3. 运行时同样需要动态库可被系统动态链接器找到（`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / `PATH`）。
+</Note>
+
+---
+
+## 下载模型
+
+从 [kws-models Release 页面](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) 下载预训练模型，例如：
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+解压后目录结构：
+
+```
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+├── encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+├── decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+├── joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+├── tokens.txt
+└── test_wavs/
+    ├── 3.wav
+    └── test_keywords.txt
+```
+
+---
+
+## KeywordSpotterConfig 配置说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ModelConfig.Transducer.Encoder` | `string` | Encoder ONNX 模型路径 |
+| `ModelConfig.Transducer.Decoder` | `string` | Decoder ONNX 模型路径 |
+| `ModelConfig.Transducer.Joiner` | `string` | Joiner ONNX 模型路径 |
+| `ModelConfig.Tokens` | `string` | 词表文件路径（`tokens.txt`） |
+| `ModelConfig.NumThreads` | `int` | 推理线程数，默认 `1` |
+| `ModelConfig.Provider` | `string` | 推理后端，可选 `"cpu"`、`"cuda"`、`"coreml"` 等 |
+| `ModelConfig.Debug` | `int` | 调试模式，`1` 开启，输出详细日志 |
+| `KeywordsFile` | `string` | 预定义关键词文件路径，每行一个关键词的音素序列 |
+| `KeywordsScore` | `float32` | 关键词得分阈值（可选） |
+| `KeywordsThreshold` | `float32` | 检测置信度阈值（可选） |
+| `NumTrailingBlanks` | `int` | 触发检测所需的尾部空白帧数（可选） |
+
+---
+
+## 核心 API
+
+### `sherpa.NewKeywordSpotter(config *KeywordSpotterConfig) *KeywordSpotter`
+
+根据配置创建关键词检测器实例。失败时返回 `nil`。
+
+### `sherpa.DeleteKeywordSpotter(spotter *KeywordSpotter)`
+
+释放关键词检测器占用的原生内存。
+
+### `sherpa.NewKeywordStream(spotter *KeywordSpotter) *OnlineStream`
+
+使用**预定义关键词**（来自 `KeywordsFile`）创建音频流。
+
+### `sherpa.NewKeywordStreamWithKeywords(spotter *KeywordSpotter, keywords string) *OnlineStream`
+
+在预定义关键词基础上，**动态追加**额外关键词后创建音频流。
+
+关键词格式：拼音音素用空格分隔，`@` 后跟汉字显示标签，多个关键词用 `/` 分隔：
+
+```
+y ǎn y uán @演员/zh ī m íng @知名
+```
+
+### `sherpa.DeleteOnlineStream(stream *OnlineStream)`
+
+释放音频流占用的原生内存。
+
+### `stream.AcceptWaveform(sampleRate int, samples []float32)`
+
+向流中输入 PCM 音频数据（16-bit 归一化为 float32，范围 `[-1.0, 1.0]`）。
+
+### `spotter.IsReady(stream *OnlineStream) bool`
+
+判断流中是否积累了足够的音频帧以执行一次解码步骤。
+
+### `spotter.Decode(stream *OnlineStream)`
+
+执行一次增量解码。
+
+### `spotter.GetResult(stream *OnlineStream) *KeywordResult`
+
+获取当前检测结果。`result.Keyword` 为空字符串时表示尚未检测到关键词。
+
+### `spotter.Reset(stream *OnlineStream)`
+
+**检测到关键词后必须立即调用**，重置流的内部状态，以便继续监听下一个关键词。
+
+---
+
+## 完整示例代码
+
+以下示例演示三种使用场景：纯预定义关键词、追加单个关键词、追加两个关键词。
+
+```go
+package main
+
+import (
+    sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+    "log"
+)
+
+func main() {
+    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+    config := sherpa.KeywordSpotterConfig{}
+
+    // 请从以下地址下载模型：
+    // https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+
+    config.ModelConfig.Transducer.Encoder = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+    config.ModelConfig.Transducer.Decoder = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+    config.ModelConfig.Transducer.Joiner  = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx"
+    config.ModelConfig.Tokens             = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt"
+    config.KeywordsFile                   = "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt"
+    config.ModelConfig.NumThreads         = 1
+    config.ModelConfig.Debug              = 1
+
+    spotter := sherpa.NewKeywordSpotter(&config)
+    defer sherpa.DeleteKeywordSpotter(spotter)
+
+    waveFilename := "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav"
+
+    wave := sherpa.ReadWave(waveFilename)
+    if wave == nil {
+        log.Printf("读取音频文件失败：%v\n", waveFilename)
+        return
+    }
+
+    // ── 场景一：使用预定义关键词 ──────────────────────────────────────
+    log.Println("----------使用预定义关键词----------")
+
+    stream := sherpa.NewKeywordStream(spotter)
+    defer sherpa.DeleteOnlineStream(stream)
+
+    stream.AcceptWaveform(wave.SampleRate, wave.Samples)
+
+    for spotter.IsReady(stream) {
+        spotter.Decode(stream)
+        result := spotter.GetResult(stream)
+        if result.Keyword != "" {
+            // 检测到关键词后必须立即调用 Reset，以便继续监听
+            spotter.Reset(stream)
+            log.Printf("检测到关键词：%v\n", result.Keyword)
+        }
+    }
+
+    // ── 场景二：预定义关键词 + 动态追加一个关键词 ────────────────────
+    log.Println("----------预定义关键词 + 追加一个新关键词----------")
+
+    stream2 := sherpa.NewKeywordStreamWithKeywords(spotter, "y ǎn y uán @演员")
+    defer sherpa.DeleteOnlineStream(stream2)
+
+    stream2.AcceptWaveform(wave.SampleRate, wave.Samples)
+
+    for spotter.IsReady(stream2) {
+        spotter.Decode(stream2)
+        result := spotter.GetResult(stream2)
+        if result.Keyword != "" {
+            log.Printf("检测到关键词：%v\n", result.Keyword)
+        }
+    }
+
+    // ── 场景三：预定义关键词 + 动态追加两个关键词 ────────────────────
+    log.Println("----------预定义关键词 + 追加两个新关键词----------")
+
+    stream3 := sherpa.NewKeywordStreamWithKeywords(spotter, "y ǎn y uán @演员/zh ī m íng @知名")
+    defer sherpa.DeleteOnlineStream(stream3)
+
+    stream3.AcceptWaveform(wave.SampleRate, wave.Samples)
+
+    for spotter.IsReady(stream3) {
+        spotter.Decode(stream3)
+        result := spotter.GetResult(stream3)
+        if result.Keyword != "" {
+            log.Printf("检测到关键词：%v\n", result.Keyword)
+        }
+    }
+}
+```
+
+<Tip>
+**资源释放最佳实践**
+
+务必在创建 `spotter` 和 `stream` 后立即用 `defer` 注册释放函数：
+
+```go
+spotter := sherpa.NewKeywordSpotter(&config)
+defer sherpa.DeleteKeywordSpotter(spotter)
+
+stream := sherpa.NewKeywordStream(spotter)
+defer sherpa.DeleteOnlineStream(stream)
+```
+
+`defer` 能保证函数退出时（包括发生 panic 时）原生内存被正确释放，避免 C 堆内存泄漏。
+</Tip>
+
+---
+
+## 动态关键词格式说明
+
+关键词以**拼音音素**表示，音素之间用**空格**分隔，`@` 后跟**中文显示标签**，多个关键词之间用 `/` 分隔：
+
+```
+# 单个关键词
+y ǎn y uán @演员
+
+# 多个关键词（/ 分隔）
+y ǎn y uán @演员/zh ī m íng @知名
+```
+
+<Note>
+`@` 标签是可选的显示名称，当 `result.Keyword` 返回时会显示该标签内容。若未提供 `@` 标签，则返回原始音素序列。
+</Note>
+
+---
+
+## 运行示例
+
+```bash
+# 设置动态库路径（Linux）
+export LD_LIBRARY_PATH=/path/to/sherpa-onnx-libs:$LD_LIBRARY_PATH
+
+# 编译并运行
+go run main.go
+```
+
+预期输出示例：
+
+```
+2024/01/01 12:00:00.000000 ----------使用预定义关键词----------
+2024/01/01 12:00:00.123456 检测到关键词：小爱同学
+2024/01/01 12:00:00.234567 ----------预定义关键词 + 追加一个新关键词----------
+2024/01/01 12:00:00.345678 检测到关键词：演员
+```

@@ -1,0 +1,157 @@
+---
+title: "sherpa-onnx Python 包安装：pip、虚拟环境与 sounddevice/soundfile 依赖配置"
+sidebarTitle: "安装"
+description: "通过 pip install sherpa-onnx 一键安装，支持 Python 3.7+ 及 Windows、macOS、Linux 全平台。本文介绍虚拟环境创建、安装验证，以及麦克风实时输入（sounddevice）和音频文件读取（soundfile）两类可选依赖的安装方法。"
+---
+
+`sherpa-onnx` 是基于 [ONNX Runtime](https://onnxruntime.ai/) 构建的离线/流式语音识别与关键词唤醒推理库。Python 包已发布到 PyPI，可直接通过 `pip` 安装，无需编译 C++ 代码。支持 Python 3.7 及以上版本，兼容 Windows（x86\_64）、macOS（x86\_64 / Apple Silicon）和 Linux（x86\_64 / aarch64）平台。
+
+<Note>
+  **支持的 Python 版本和平台**
+
+  - Python 版本：**3.7 及以上**（推荐 3.8+）
+  - 操作系统：**Windows**（x86\_64）、**macOS**（x86\_64 / Apple Silicon）、**Linux**（x86\_64 / aarch64）
+  - 架构：`x86_64`、`aarch64`（ARM64）、`Apple Silicon (M1/M2/M3)`
+</Note>
+
+---
+
+## 安装步骤
+
+<Steps>
+  <Step title="（可选）创建并激活虚拟环境">
+    建议在独立的虚拟环境中安装，避免与系统包冲突：
+
+    ```bash
+    python -m venv sherpa-env
+    # Linux / macOS
+    source sherpa-env/bin/activate
+    # Windows PowerShell
+    .\sherpa-env\Scripts\Activate.ps1
+    ```
+  </Step>
+
+  <Step title="安装 sherpa-onnx 主包">
+    根据运行环境选择安装方式：
+
+    <CodeGroup>
+      ```bash CPU 版（推荐入门）
+      pip install sherpa-onnx
+      ```
+
+      ```bash 指定版本安装
+      pip install sherpa-onnx==1.10.30
+      ```
+    </CodeGroup>
+
+    <Warning>
+      **GPU（CUDA）版本注意事项**
+
+      - `sherpa-onnx` 通过 ONNX Runtime 的 CUDA Execution Provider 支持 GPU 推理，与 CPU 版使用同一个 PyPI 包。
+      - 使用 GPU 推理前，请确认已安装与 ONNX Runtime 版本匹配的 **CUDA Toolkit**（通常为 CUDA 11.x 或 12.x）和对应的 **cuDNN**。
+      - 可通过 `python -c "import onnxruntime; print(onnxruntime.get_available_providers())"` 检查 `CUDAExecutionProvider` 是否可用。
+      - 若驱动版本不匹配，推理时会自动回退到 CPU，不会报错，但不会使用 GPU 加速。
+    </Warning>
+  </Step>
+
+  <Step title="验证安装">
+    安装完成后，在终端执行以下命令验证：
+
+    ```bash
+    python -c "import sherpa_onnx; print(sherpa_onnx.__version__)"
+    ```
+
+    输出示例：
+
+    ```text
+    1.10.30
+    ```
+
+    若能正常打印版本号，说明安装成功。
+  </Step>
+
+  <Step title="安装可选依赖">
+    根据使用场景，按需安装以下可选依赖：
+
+    <CodeGroup>
+      ```bash 麦克风实时输入
+      pip install sounddevice
+      ```
+
+      ```bash 读取音频文件
+      pip install soundfile
+      ```
+
+      ```bash 同时安装全部可选依赖
+      pip install sounddevice soundfile
+      ```
+    </CodeGroup>
+
+    | 依赖包          | 用途                                  | 是否必须         |
+    | --------------- | ------------------------------------- | ---------------- |
+    | `sounddevice`   | 从系统麦克风实时读取 PCM 音频流       | 麦克风场景必须   |
+    | `soundfile`     | 读取 WAV、FLAC、OGG 等音频文件        | 文件输入场景推荐 |
+    | `numpy`         | 音频数组处理（`sherpa-onnx` 已自动依赖） | 自动安装         |
+  </Step>
+</Steps>
+
+---
+
+## 从源码构建（高级）
+
+如需针对特定平台或编译选项进行定制，可从源码构建：
+
+```bash
+# 克隆仓库
+git clone https://github.com/k2-fsa/sherpa-onnx
+cd sherpa-onnx
+
+# 安装构建依赖
+pip install cmake scikit-build
+
+# 构建并安装（自动编译 C++ 扩展）
+pip install .
+```
+
+<Note>
+  从源码构建需要系统已安装 **CMake 3.14+** 和支持 C++17 的编译器（GCC 7+ / Clang 9+ / MSVC 2019+）。
+</Note>
+
+---
+
+## 下载预训练模型
+
+安装完成后，还需下载对应语言的预训练模型才能运行关键词唤醒。请访问以下页面获取模型列表：
+
+```text
+https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html
+```
+
+以中文关键词唤醒模型为例：
+
+```bash
+# 下载 WenetSpeech 3.3M 关键词唤醒模型
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+解压后目录结构如下：
+
+```text
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+├── encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+├── decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+├── joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+├── tokens.txt
+└── test_wavs/
+    ├── 3.wav
+    └── test_keywords.txt
+```
+
+---
+
+## 后续步骤
+
+- [KeywordSpotter 类 API 参考](/api/python/keyword-spotter-class) — 完整的构造函数参数与方法说明
+- [从音频文件检测关键词](/api/python/from-file) — 完整的文件输入示例
+- [从麦克风实时检测关键词](/api/python/from-microphone) — 实时唤醒示例

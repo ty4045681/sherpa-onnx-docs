@@ -1,0 +1,325 @@
+---
+title: "iOS 平台集成 sherpa-onnx KWS 实现 Swift 离线关键词唤醒指南"
+sidebarTitle: "iOS"
+description: "在 iOS 应用中集成 sherpa-onnx KWS 离线关键词唤醒，通过 SPM 或手动集成 XCFramework，支持真机 arm64 和模拟器 arm64/x86_64，启用 CoreML Neural Engine 加速并配置 NSMicrophoneUsageDescription 权限。"
+---
+
+sherpa-onnx 为 iOS 平台提供以静态 XCFramework 形式打包的库，支持 Swift 和 Objective-C 通过 C API 桥接层调用 KWS 功能，全程离线无需网络连接。XCFramework 将真机 arm64 与模拟器 arm64/x86_64 合并为统一产物，一次集成覆盖所有场景，最低部署目标为 iOS 13.0。
+
+### 支持的架构与平台
+
+| 目标平台 | CPU 架构 | 说明 |
+|----------|----------|------|
+| iPhone / iPad（真机） | `arm64` | 所有现代 iOS 设备 |
+| iOS 模拟器（Intel Mac） | `x86_64` | Xcode 模拟器 |
+| iOS 模拟器（Apple Silicon Mac） | `arm64` | Xcode 模拟器 |
+
+最低部署目标：**iOS 13.0**
+
+<Note>
+iOS 模拟器**不提供麦克风访问能力**，无法在模拟器中测试实时录音功能。请使用真实 iPhone/iPad 设备测试完整的 KWS 唤醒流程。
+</Note>
+
+---
+
+## 集成方式一：Swift Package Manager（推荐）
+
+### 步骤 1：在 Xcode 中添加包依赖
+
+1. 打开你的 Xcode 项目
+2. 菜单选择 **File → Add Package Dependencies…**
+3. 在搜索栏中输入：
+   ```
+   https://github.com/k2-fsa/sherpa-onnx
+   ```
+4. 选择合适的版本规则（建议 **Up to Next Major Version**）
+5. 点击 **Add Package**，选择目标 Target 后确认
+
+### 步骤 2：导入模块
+
+```swift
+import SherpaOnnxC
+```
+
+---
+
+## 集成方式二：手动集成 XCFramework
+
+如果项目不使用 SPM 或需要固定版本，可手动集成。
+
+### 步骤 1：从源码编译
+
+```bash
+# 克隆仓库
+git clone https://github.com/k2-fsa/sherpa-onnx.git
+cd sherpa-onnx
+
+# 执行 iOS 编译脚本（需要 Xcode Command Line Tools）
+./build-ios.sh
+```
+
+编译脚本会依次完成以下工作：
+- 为**模拟器 x86_64**、**模拟器 arm64**、**真机 arm64** 三个目标分别编译
+- 使用 `lipo` 将模拟器的两个架构合并为 fat binary
+- 使用 `xcodebuild -create-xcframework` 打包为 `sherpa-onnx.xcframework`
+- 压缩为 `sherpa-onnx-<VERSION>-ios-static.xcframework.zip`
+
+### 步骤 2：拖入 Xcode 项目
+
+将编译生成的 `sherpa-onnx.xcframework` 拖入 Xcode 项目的 **Frameworks, Libraries, and Embedded Content** 区域，选择 **Do Not Embed**（静态库无需嵌入）。
+
+---
+
+## 模型文件添加到 Xcode Bundle
+
+1. 将下载的模型目录（包含 `.onnx` 文件和 `tokens.txt`、`keywords.txt`）拖入 Xcode 项目
+2. 在弹出窗口中勾选 **"Add to targets"** 并选择你的应用 Target
+3. 确认 **"Create folder references"**（保持目录结构）
+4. 在 Build Phases → **Copy Bundle Resources** 中确认模型文件已包含
+
+运行时通过 Bundle 路径访问模型：
+
+```swift
+// 获取 Bundle 中模型目录路径
+func modelPath(for filename: String) -> String {
+    guard let path = Bundle.main.path(
+        forResource: filename,
+        ofType: nil,
+        inDirectory: "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+    ) else {
+        fatalError("找不到模型文件：\(filename)")
+    }
+    return path
+}
+```
+
+---
+
+## 麦克风权限配置
+
+在 `Info.plist` 中添加麦克风使用说明（iOS 系统要求此字段存在，否则授权请求会被拒绝并导致崩溃）：
+
+```xml
+<key>NSMicrophoneUsageDescription</key>
+<string>本应用需要访问麦克风以实现本地关键词唤醒功能，所有音频处理均在设备本地完成，不会上传至服务器。</string>
+```
+
+或者在 Xcode 的 **Info** 选项卡中直接添加：
+- Key：`Privacy - Microphone Usage Description`
+- Value：你的说明文字
+
+---
+
+## Swift 代码示例
+
+### 封装 KWS 管理类
+
+```swift
+import Foundation
+import SherpaOnnxC
+import AVFoundation
+
+/// 关键词唤醒管理器
+class KeywordSpotterManager {
+
+    private var recognizer: OpaquePointer?   // SherpaOnnxKeywordSpotter*
+    private var stream: OpaquePointer?       // SherpaOnnxOnlineStream*
+
+    /// 初始化 KWS
+    /// - Parameter modelDir: 模型目录的完整路径（Bundle 内）
+    func setup(modelDir: String) {
+        let encoder  = "\(modelDir)/encoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+        let decoder  = "\(modelDir)/decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+        let joiner   = "\(modelDir)/joiner-epoch-12-avg-2-chunk-16-left-64.onnx"
+        let tokens   = "\(modelDir)/tokens.txt"
+        let keywords = "\(modelDir)/keywords.txt"
+
+        // 模型配置
+        var transducer = SherpaOnnxOnlineTransducerModelConfig()
+        transducer.encoder = (encoder as NSString).utf8String
+        transducer.decoder = (decoder as NSString).utf8String
+        transducer.joiner  = (joiner  as NSString).utf8String
+
+        var modelConfig = SherpaOnnxOnlineModelConfig()
+        modelConfig.transducer   = transducer
+        modelConfig.tokens       = (tokens as NSString).utf8String
+        modelConfig.num_threads  = 1
+        modelConfig.provider     = ("cpu" as NSString).utf8String  // 或 "coreml"
+
+        // 特征提取器配置
+        var featConfig = SherpaOnnxFeatureConfig()
+        featConfig.sample_rate = 16000
+        featConfig.feature_dim = 80
+
+        // KWS 整体配置
+        var config = SherpaOnnxKeywordSpotterConfig()
+        config.feat_config         = featConfig
+        config.model_config        = modelConfig
+        config.keywords_file       = (keywords as NSString).utf8String
+        config.keywords_score      = 1.0
+        config.keywords_threshold  = 0.25
+        config.num_trailing_blanks = 1
+
+        recognizer = SherpaOnnxCreateKeywordSpotter(&config)
+        stream     = SherpaOnnxCreateKeywordStream(recognizer)
+    }
+
+    /// 送入音频数据（Float32，[-1, 1]，16kHz，单声道）
+    func acceptWaveform(_ samples: [Float], sampleRate: Int32 = 16000) {
+        guard let s = stream else { return }
+        samples.withUnsafeBufferPointer { ptr in
+            SherpaOnnxOnlineStreamAcceptWaveform(s, sampleRate, ptr.baseAddress, Int32(samples.count))
+        }
+    }
+
+    /// 解码并返回检测到的关键词，未触发返回 nil
+    func decode() -> String? {
+        guard let r = recognizer, let s = stream else { return nil }
+        while SherpaOnnxIsKeywordStreamReady(r, s) != 0 {
+            SherpaOnnxDecodeKeywordStream(r, s)
+        }
+        guard let result = SherpaOnnxGetKeywordResult(r, s) else { return nil }
+        let keyword = String(cString: result.pointee.keyword)
+        SherpaOnnxDestroyKeywordResult(result)
+
+        if keyword.isEmpty { return nil }
+
+        // 检测到后立即 reset，防止重复触发
+        SherpaOnnxResetKeywordStream(r, s)
+        return keyword
+    }
+
+    deinit {
+        if let s = stream      { SherpaOnnxDestroyOnlineStream(s) }
+        if let r = recognizer  { SherpaOnnxDestroyKeywordSpotter(r) }
+    }
+}
+```
+
+### 实时麦克风唤醒（AVAudioEngine）
+
+```swift
+import AVFoundation
+
+class MicrophoneKWSViewController: UIViewController {
+
+    private let kwsManager   = KeywordSpotterManager()
+    private let audioEngine  = AVAudioEngine()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        // 初始化模型
+        guard let modelDir = Bundle.main.path(
+            forResource: "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+            ofType: nil
+        ) else { return }
+        kwsManager.setup(modelDir: modelDir)
+
+        requestMicrophonePermission()
+    }
+
+    private func requestMicrophonePermission() {
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted {
+                    self?.startListening()
+                } else {
+                    print("麦克风权限被拒绝")
+                }
+            }
+        }
+    }
+
+    private func startListening() {
+        let inputNode   = audioEngine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+
+        // 目标格式：16kHz, 单声道, Float32
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        )!
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) {
+            [weak self] buffer, _ in
+
+            // 重采样到 16kHz
+            guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat),
+                  let pcmBuffer = AVAudioPCMBuffer(
+                      pcmFormat: targetFormat,
+                      frameCapacity: AVAudioFrameCount(
+                          Double(buffer.frameLength) * 16000.0 / inputFormat.sampleRate
+                      )
+                  ) else { return }
+
+            var error: NSError?
+            var isDone = false
+            converter.convert(to: pcmBuffer, error: &error) { _, outStatus in
+                if isDone {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                isDone = true
+                outStatus.pointee = .haveData
+                return buffer
+            }
+
+            // 取出 Float32 采样并送入 KWS
+            if let channelData = pcmBuffer.floatChannelData?[0] {
+                let samples = Array(UnsafeBufferPointer(
+                    start: channelData,
+                    count: Int(pcmBuffer.frameLength)
+                ))
+                self?.kwsManager.acceptWaveform(samples)
+            }
+
+            // 检查是否检测到关键词
+            DispatchQueue.main.async {
+                if let keyword = self?.kwsManager.decode() {
+                    print("检测到关键词：\(keyword)")
+                    // 在此执行唤醒后的业务逻辑
+                }
+            }
+        }
+
+        try? audioEngine.start()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+    }
+}
+```
+
+---
+
+## CoreML 加速
+
+在支持 Neural Engine 的设备（iPhone XS 及更新机型）上，可通过将 `provider` 设置为 `"coreml"` 启用 CoreML 硬件加速：
+
+```swift
+modelConfig.provider = ("coreml" as NSString).utf8String
+```
+
+使用 CoreML 加速时的注意事项：
+
+| 事项 | 说明 |
+|------|------|
+| 首次运行 | 系统会编译 CoreML 模型，耗时较长（可达数秒）；后续运行会使用缓存 |
+| 功耗 | Neural Engine 的能效比远高于 CPU，适合长时间待机唤醒场景 |
+| 兼容性 | 仅真机支持；模拟器上 CoreML 会自动降级为 CPU 运行 |
+| 构建时 | XCFramework 已包含 CoreML 所需 provider；无需额外链接 |
+
+---
+
+## 参考链接
+
+- [官方 iOS 示例与说明](https://k2-fsa.github.io/sherpa/onnx/ios/index.html)
+- [预训练 KWS 模型下载](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)
+- [sherpa-onnx Swift Package 源码](https://github.com/k2-fsa/sherpa-onnx)
+- [C API 头文件参考](https://github.com/k2-fsa/sherpa-onnx/blob/master/sherpa-onnx/c-api/c-api.h)

@@ -1,0 +1,147 @@
+---
+title: "sherpa-onnx KWS 预训练模型列表：中文、英文 Zipformer 关键词唤醒模型"
+sidebarTitle: "预训练模型"
+description: "sherpa-onnx 提供基于 Zipformer Transducer 的关键词唤醒（KWS）预训练模型，涵盖中文 WenetSpeech 和英文 GigaSpeech 两大系列，支持标准 FP32、int8 量化及移动端优化（-mobile）三种变体，可通过 GitHub Releases 免注册下载。"
+---
+
+sherpa-onnx 提供的关键词唤醒（KWS）预训练模型基于 **Zipformer Transducer** 架构训练，支持流式（在线）推理，可直接用于端侧语音唤醒场景。所有模型均以 ONNX 格式发布，并提供标准版与 int8 量化版两种变体，同时针对移动端提供专项优化版本（`-mobile` 后缀）。模型从 [GitHub Releases](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) 分发，无需注册即可下载。
+
+---
+
+## 可用模型一览
+
+<CardGroup cols={2}>
+  <Card title="中文模型（WenetSpeech）" icon="language">
+    **sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01**
+
+    - 🌐 语言：**中文（普通话）**
+    - 🏋️ 参数量：约 **3.3M**
+    - 📦 训练数据：[WenetSpeech](https://wenet-e2e.github.io/WenetSpeech/)（万小时级中文语料）
+    - 🗓️ 发布日期：2024-01-01
+    - 📁 格式：ONNX 标准版 + int8 量化版
+    - 📱 移动端优化版：`-mobile` 后缀版本可用
+  </Card>
+  <Card title="英文模型（GigaSpeech）" icon="globe">
+    **sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01**
+
+    - 🌐 语言：**英文**
+    - 🏋️ 参数量：约 **3.3M**
+    - 📦 训练数据：[GigaSpeech](https://github.com/SpeechColab/GigaSpeech)（万小时级英文语料）
+    - 🗓️ 发布日期：2024-01-01
+    - 📁 格式：ONNX 标准版 + int8 量化版
+    - 📱 移动端优化版：`-mobile` 后缀版本可用
+  </Card>
+</CardGroup>
+
+---
+
+## 模型详细对比
+
+| 属性 | 中文模型 | 英文模型 |
+|------|---------|---------|
+| 模型名称 | `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01` | `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01` |
+| 目标语言 | 中文（普通话） | 英文 |
+| 模型架构 | Zipformer Transducer | Zipformer Transducer |
+| 参数量 | ~3.3M | ~3.3M |
+| 训练语料 | WenetSpeech | GigaSpeech |
+| 编码器文件 | `encoder-epoch-12-avg-2-chunk-16-left-64.onnx` | `encoder-epoch-12-avg-2-chunk-16-left-64.onnx` |
+| 词表文件 | `tokens.txt`（中文字符/音素） | `tokens.txt` + `bpe.model`（BPE 子词） |
+| 推理模式 | 流式（在线） | 流式（在线） |
+| 批处理大小 | 仅支持 batch=1 | 仅支持 batch=1 |
+
+---
+
+## int8 量化版说明
+
+每个模型均提供 **int8 量化版**（文件名含 `.int8.onnx` 后缀）。量化版在编码器（encoder）和 joiner 上进行了 INT8 整数量化，decoder 保持 FP32 精度不变。
+
+| 维度 | 标准版（FP32） | int8 量化版 |
+|------|-------------|-----------|
+| 模型文件体积 | 较大（~12 MB encoder） | **缩减约 60–70%** |
+| 推理速度 | 基准 | **更快**，尤其在 CPU 上 |
+| 内存占用 | 较高 | **明显降低** |
+| 识别精度 | 最优 | 略有损失（通常低于 1% WER 差距） |
+| 适用场景 | 服务端、精度优先 | 嵌入式、移动端、资源受限场景 |
+
+<Tip>
+对于移动端或边缘设备部署，**优先选择 int8 量化版**。在大多数关键词唤醒场景下，量化带来的精度损失可忽略不计，而体积与速度提升十分显著。
+</Tip>
+
+---
+
+## 移动端优化版（-mobile）
+
+带有 `-mobile` 后缀的模型在标准 Zipformer 模型基础上进一步压缩，专为 **Android / iOS** 等资源受限平台设计：
+
+- **体积更小**：encoder 经过结构剪枝，适合随 App 分发
+- **延迟更低**：针对单核 CPU 推理路径优化
+- **Batch=1 限制**：与标准版相同，仅支持单路流式推理
+
+移动端模型下载地址示例：
+
+```text
+https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+```
+
+<Note>
+移动端版本（`-mobile`）与标准版的文件结构略有不同：mobile 版的 joiner 仅提供 int8 量化版（`joiner-*.int8.onnx`），不含 FP32 版 `joiner.onnx`，这是有意设计以进一步压缩包大小。
+</Note>
+
+---
+
+## 模型文件结构
+
+解压后，每个模型目录包含以下文件（以中文标准版为例）：
+
+```text
+sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+├── encoder-epoch-12-avg-2-chunk-16-left-64.onnx        # 编码器（FP32）
+├── encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx   # 编码器（INT8 量化）
+├── decoder-epoch-12-avg-2-chunk-16-left-64.onnx        # 解码器（FP32）
+├── joiner-epoch-12-avg-2-chunk-16-left-64.onnx         # Joiner（FP32）
+├── joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx    # Joiner（INT8 量化）
+├── tokens.txt                                          # 词表文件
+├── README.md                                           # 模型说明
+└── test_wavs/
+    ├── 3.wav                                           # 测试音频（中文）
+    ├── 4.wav
+    ├── 5.wav
+    ├── 6.wav
+    └── test_keywords.txt                               # 预置关键词列表
+```
+
+英文模型（GigaSpeech）额外包含：
+
+```text
+sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/
+├── ...（同上）
+├── bpe.model                                           # BPE 子词模型（英文专用）
+└── test_wavs/
+    ├── 0.wav
+    ├── 1.wav
+    └── test_keywords.txt
+```
+
+### 各文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `encoder-*.onnx` | Zipformer 流式编码器，将音频特征编码为高维向量序列 |
+| `decoder-*.onnx` | 解码器，基于历史 token 生成预测 |
+| `joiner-*.onnx` | Joiner 网络，融合编码器与解码器输出，计算最终 logits |
+| `tokens.txt` | 词表，每行一个 token，与模型输出 index 一一对应 |
+| `bpe.model` | SentencePiece BPE 模型，仅英文模型包含 |
+| `test_wavs/` | 内置测试音频与关键词文件，可直接运行验证模型 |
+| `test_wavs/test_keywords.txt` | 预定义关键词文件，每行一个关键词（音素序列格式） |
+
+---
+
+<Note>
+所有预训练模型均从 **GitHub Releases** 分发，下载地址为：
+
+```text
+https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+```
+
+无需注册账号，直接通过 `curl` 或浏览器即可下载。如访问 GitHub 速度较慢，也可从 [ModelScope 镜像](https://www.modelscope.cn/models/pkufool/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01) 获取中文模型。
+</Note>

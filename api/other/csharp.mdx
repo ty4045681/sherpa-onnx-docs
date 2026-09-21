@@ -1,0 +1,292 @@
+---
+title: "sherpa-onnx C# .NET 绑定：关键词唤醒（KWS）开发指南"
+sidebarTitle: "C#"
+description: "使用 SherpaOnnx NuGet 包在 Windows、macOS、Linux .NET 应用中实现关键词唤醒，涵盖 KeywordSpotter 配置、解码循环及动态追加关键词完整示例。"
+---
+
+sherpa-onnx 提供了 .NET（C#）绑定，通过 P/Invoke 调用底层 C API。NuGet 包 `SherpaOnnx` 内置了 Windows、macOS、Linux 三平台的预编译原生库，安装后开箱即用，无需手动配置动态库路径。
+
+---
+
+## 安装
+
+```bash
+dotnet add package SherpaOnnx
+```
+
+或在 `.csproj` 中手动添加：
+
+```xml
+<PackageReference Include="SherpaOnnx" Version="*" />
+```
+
+---
+
+## 下载模型
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+---
+
+## 配置结构说明
+
+### `KeywordSpotterConfig`
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `FeatConfig.SampleRate` | `int` | 音频采样率，通常为 `16000` |
+| `FeatConfig.FeatureDim` | `int` | Fbank 特征维度，通常为 `80` |
+| `ModelConfig.Transducer.Encoder` | `string` | Encoder ONNX 模型路径 |
+| `ModelConfig.Transducer.Decoder` | `string` | Decoder ONNX 模型路径 |
+| `ModelConfig.Transducer.Joiner` | `string` | Joiner ONNX 模型路径 |
+| `ModelConfig.Tokens` | `string` | 词表文件路径 |
+| `ModelConfig.Provider` | `string` | 推理后端（`"cpu"` / `"cuda"` / `"coreml"`） |
+| `ModelConfig.NumThreads` | `int` | 推理线程数 |
+| `ModelConfig.Debug` | `int` | 调试模式，`1` 开启 |
+| `KeywordsFile` | `string` | 预定义关键词文件路径 |
+| `KeywordsScore` | `float` | 关键词得分阈值（可选） |
+| `KeywordsThreshold` | `float` | 检测置信度阈值（可选） |
+| `NumTrailingBlanks` | `int` | 触发检测所需的尾部空白帧数（可选） |
+
+---
+
+## 核心 API
+
+### `new KeywordSpotter(config)`
+
+根据 `KeywordSpotterConfig` 创建关键词检测器实例。
+
+### `kws.CreateStream() → OnlineStream`
+
+使用预定义关键词文件（`KeywordsFile`）创建音频输入流。
+
+### `kws.CreateStream(keywords: string) → OnlineStream`
+
+在预定义关键词基础上，动态追加额外关键词后创建流。多个关键词用 `/` 分隔：
+
+```csharp
+// 追加单个关键词
+var s = kws.CreateStream("y ǎn y uán @演员");
+
+// 追加多个关键词（/ 分隔）
+var s = kws.CreateStream("y ǎn y uán @演员/zh ī m íng @知名");
+```
+
+### `s.AcceptWaveform(sampleRate: int, samples: float[])`
+
+向流中输入 PCM 音频数据（`float[]`，范围 `[-1.0f, 1.0f]`）。
+
+### `s.InputFinished()`
+
+通知流音频输入已结束，刷新解码器缓冲区。
+
+### `kws.IsReady(s) → bool`
+
+判断是否有足够帧数可执行解码。
+
+### `kws.Decode(s)`
+
+执行一次增量解码。
+
+### `kws.GetResult(s) → KeywordResult`
+
+获取当前检测结果。
+
+### `kws.Reset(s)`
+
+**检测到关键词后立即调用**，重置流状态以继续监听。
+
+---
+
+## `KeywordResult` 说明
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `Keyword` | `string` | 检测到的关键词文本 |
+
+<Note>
+**`result.Keyword` 为 `string.Empty` 时表示未检测到关键词**
+
+每次调用 `kws.Decode(s)` 后都需要检查 `kws.GetResult(s).Keyword`：
+
+```csharp
+var result = kws.GetResult(s);
+if (result.Keyword != string.Empty)
+{
+    // ✅ 检测到关键词
+    kws.Reset(s);  // 立即重置，继续监听
+    Console.WriteLine("检测到：{0}", result.Keyword);
+}
+// result.Keyword == string.Empty 时表示本帧无关键词，继续解码即可
+```
+
+不要将空字符串当作错误处理，它仅表示当前帧尚未触发关键词检测。
+</Note>
+
+---
+
+## 完整示例代码
+
+```csharp
+// Copyright (c) 2024 Xiaomi Corporation
+//
+// 本示例演示如何使用 sherpa-onnx C# API 实现关键词唤醒。
+//
+// 1. 从以下地址下载模型：
+//    https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+//
+//    wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+//    tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+//
+// 2. 运行：dotnet run
+
+using SherpaOnnx;
+
+class KeywordSpotterDemo
+{
+  static void Main(string[] args)
+  {
+    // ── 1. 配置检测器 ─────────────────────────────────────────────
+    var config = new KeywordSpotterConfig();
+    config.FeatConfig.SampleRate = 16000;
+    config.FeatConfig.FeatureDim = 80;
+
+    config.ModelConfig.Transducer.Encoder =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+    config.ModelConfig.Transducer.Decoder =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+    config.ModelConfig.Transducer.Joiner =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx";
+
+    config.ModelConfig.Tokens =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt";
+    config.ModelConfig.Provider    = "cpu";
+    config.ModelConfig.NumThreads  = 1;
+    config.ModelConfig.Debug       = 1;
+    config.KeywordsFile =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt";
+
+    // ── 2. 创建检测器 ─────────────────────────────────────────────
+    var kws = new KeywordSpotter(config);
+
+    var filename =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav";
+    var waveReader = new WaveReader(filename);
+
+    // 尾部静音填充，确保最后几帧被解码
+    float[] tailPadding = new float[(int)(waveReader.SampleRate * 0.3)];
+
+    // ── 场景一：使用预定义关键词 ──────────────────────────────────
+    Console.WriteLine("----------使用预定义关键词----------");
+
+    var s = kws.CreateStream();
+    s.AcceptWaveform(waveReader.SampleRate, waveReader.Samples);
+    s.AcceptWaveform(waveReader.SampleRate, tailPadding);
+    s.InputFinished();
+
+    while (kws.IsReady(s))
+    {
+      kws.Decode(s);
+      var result = kws.GetResult(s);
+      if (result.Keyword != string.Empty)
+      {
+        // 检测到关键词后立即调用 Reset
+        kws.Reset(s);
+        Console.WriteLine("检测到：{0}", result.Keyword);
+      }
+    }
+
+    // ── 场景二：预定义关键词 + 动态追加一个关键词 ─────────────────
+    Console.WriteLine("----------预定义关键词 + 追加一个新关键词----------");
+
+    s = kws.CreateStream("y ǎn y uán @演员");
+    s.AcceptWaveform(waveReader.SampleRate, waveReader.Samples);
+    s.AcceptWaveform(waveReader.SampleRate, tailPadding);
+    s.InputFinished();
+
+    while (kws.IsReady(s))
+    {
+      kws.Decode(s);
+      var result = kws.GetResult(s);
+      if (result.Keyword != string.Empty)
+      {
+        kws.Reset(s);
+        Console.WriteLine("检测到：{0}", result.Keyword);
+      }
+    }
+
+    // ── 场景三：预定义关键词 + 动态追加两个关键词 ─────────────────
+    Console.WriteLine("----------预定义关键词 + 追加两个新关键词----------");
+
+    // 多个关键词用 / 分隔
+    s = kws.CreateStream("y ǎn y uán @演员/zh ī m íng @知名");
+    s.AcceptWaveform(waveReader.SampleRate, waveReader.Samples);
+    s.AcceptWaveform(waveReader.SampleRate, tailPadding);
+    s.InputFinished();
+
+    while (kws.IsReady(s))
+    {
+      kws.Decode(s);
+      var result = kws.GetResult(s);
+      if (result.Keyword != string.Empty)
+      {
+        kws.Reset(s);
+        Console.WriteLine("检测到：{0}", result.Keyword);
+      }
+    }
+  }
+}
+```
+
+---
+
+## 动态关键词格式
+
+| 格式元素 | 说明 | 示例 |
+|----------|------|------|
+| 音素序列 | 拼音声母韵母分离，用空格隔开 | `y ǎn y uán` |
+| `@` 标签 | 关键词的中文显示名称 | `@演员` |
+| `/` 分隔符 | 分隔多个关键词 | `词A/词B` |
+
+```csharp
+// 单关键词
+kws.CreateStream("y ǎn y uán @演员");
+
+// 多关键词（/ 分隔）
+kws.CreateStream("y ǎn y uán @演员/zh ī m íng @知名");
+```
+
+---
+
+## 运行项目
+
+```bash
+dotnet run
+```
+
+预期输出：
+
+```
+----------使用预定义关键词----------
+检测到：小爱同学
+----------预定义关键词 + 追加一个新关键词----------
+检测到：演员
+----------预定义关键词 + 追加两个新关键词----------
+检测到：演员
+检测到：知名
+```
+
+---
+
+## 跨平台支持
+
+`SherpaOnnx` NuGet 包内置以下平台的预编译原生库：
+
+| 平台 | 架构 | 说明 |
+|------|------|------|
+| Windows | x64、x86、ARM64 | 需要 Visual C++ Redistributable |
+| macOS | x64（Intel）、ARM64（Apple Silicon） | 支持 macOS 10.15+ |
+| Linux | x64、ARM64、ARM32 | 基于 glibc 2.17+ |

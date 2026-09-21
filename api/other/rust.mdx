@@ -1,0 +1,298 @@
+---
+title: "sherpa-onnx Rust 绑定：实现关键词唤醒（KWS）开发指南"
+sidebarTitle: "Rust"
+description: "使用 sherpa-onnx Rust 绑定构建关键词唤醒应用，涵盖 KeywordSpotter::create 配置、流式解码、KeywordResult 结果解析及 Drop 自动内存管理。"
+---
+
+sherpa-onnx 提供了 Rust 原生绑定，通过 FFI 调用底层 C 库，具备 Rust 的零成本抽象与内存安全保证。`KeywordSpotter` 实现了 `Drop` trait，离开作用域时自动释放原生资源，无需手动析构。
+
+---
+
+## 安装
+
+在 `Cargo.toml` 中添加依赖：
+
+```toml
+[dependencies]
+sherpa-onnx = "*"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+```
+
+<Note>
+`sherpa-onnx` crate 在构建时会通过 `build.rs` 自动链接系统中的 sherpa-onnx 动态库。请确保动态库（`libsherpa-onnx-c-api.so` / `.dylib`）已安装到系统路径，或通过环境变量 `SHERPA_ONNX_LIB_DIR` 指定其位置。
+</Note>
+
+---
+
+## 下载模型
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+---
+
+## 核心数据结构
+
+### `KeywordSpotterConfig`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `model_config.transducer.encoder` | `Option<String>` | Encoder ONNX 模型路径 |
+| `model_config.transducer.decoder` | `Option<String>` | Decoder ONNX 模型路径 |
+| `model_config.transducer.joiner` | `Option<String>` | Joiner ONNX 模型路径 |
+| `model_config.tokens` | `Option<String>` | 词表文件路径 |
+| `model_config.num_threads` | `i32` | 推理线程数 |
+| `model_config.provider` | `Option<String>` | 推理后端（`"cpu"` / `"cuda"` / `"coreml"`） |
+| `model_config.debug` | `bool` | 是否开启调试日志 |
+| `keywords_file` | `Option<String>` | 预定义关键词文件路径 |
+| `keywords_score` | `f32` | 关键词得分阈值（可选） |
+| `keywords_threshold` | `f32` | 检测置信度阈值（可选） |
+| `num_trailing_blanks` | `i32` | 触发检测所需的尾部空白帧数（可选） |
+
+<Note>
+配置中涉及路径的字段均为 `Option<String>` 类型。在赋值时使用 `Some(string_value)`，若某字段不需要使用则保持 `None`（即 `Default::default()` 的默认值）。
+</Note>
+
+### `KeywordResult`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `keyword` | `String` | 检测到的关键词文本（未检测到时为空字符串） |
+| `json` | `String` | 包含详细信息的 JSON 字符串，可用于解析置信度等元数据 |
+
+---
+
+## 核心 API
+
+### `KeywordSpotter::create(config: &KeywordSpotterConfig) -> Option<KeywordSpotter>`
+
+根据配置创建关键词检测器。失败时返回 `None`，成功时返回 `Some(KeywordSpotter)`。
+
+### `kws.create_stream() -> OnlineStream`
+
+使用预定义关键词（来自 `keywords_file`）创建音频输入流。
+
+### `kws.create_stream_with_keywords(keywords: &str) -> OnlineStream`
+
+在预定义关键词基础上动态追加额外关键词后创建音频流。关键词格式同 Go API（拼音音素 + `@` 标签 + `/` 分隔）。
+
+### `stream.accept_waveform(sample_rate: i32, samples: &[f32])`
+
+向流中写入 PCM 音频数据（float32，范围 `[-1.0, 1.0]`）。
+
+### `stream.input_finished()`
+
+通知流音频输入已结束，用于刷新解码器内部缓冲区中的剩余帧。
+
+### `kws.is_ready(stream: &OnlineStream) -> bool`
+
+判断流中是否有足够的音频帧可执行一次解码步骤。
+
+### `kws.decode(stream: &OnlineStream)`
+
+执行一次增量解码。
+
+### `kws.get_result(stream: &OnlineStream) -> Option<KeywordResult>`
+
+获取当前检测结果。返回 `Some(result)` 时，若 `result.keyword` 非空则表示检测到了关键词。
+
+### `kws.reset(stream: &OnlineStream)`
+
+**检测到关键词后立即调用**，重置流状态以继续监听下一个关键词。
+
+---
+
+## 完整示例代码
+
+以下示例通过命令行参数指定模型路径与音频文件，并演示三种关键词检测场景：
+
+```rust
+// Copyright (c) 2026 Xiaomi Corporation
+//
+// 本示例演示如何使用 sherpa-onnx Rust API 实现关键词唤醒。
+
+use clap::Parser;
+use sherpa_onnx::{KeywordSpotter, KeywordSpotterConfig, Wave};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    wav: String,
+
+    #[arg(long)]
+    encoder: String,
+
+    #[arg(long)]
+    decoder: String,
+
+    #[arg(long)]
+    joiner: String,
+
+    #[arg(long)]
+    tokens: String,
+
+    #[arg(long)]
+    keywords_file: String,
+
+    #[arg(long, default_value = "cpu")]
+    provider: String,
+
+    #[arg(long, default_value_t = 1)]
+    num_threads: i32,
+
+    #[arg(long, default_value_t = false)]
+    debug: bool,
+}
+
+/// 对指定音频流执行关键词检测
+fn detect_keywords(
+    kws: &KeywordSpotter,
+    wave: &Wave,
+    title: &str,
+    extra_keywords: Option<&str>,
+) {
+    println!("{title}");
+
+    // 根据是否有额外关键词选择不同的流创建方式
+    let stream = if let Some(extra_keywords) = extra_keywords {
+        kws.create_stream_with_keywords(extra_keywords)
+    } else {
+        kws.create_stream()
+    };
+
+    // 添加尾部静音填充，确保解码器能处理最后几帧
+    let tail_padding = vec![0.0f32; (wave.sample_rate() / 2) as usize];
+    stream.accept_waveform(wave.sample_rate(), wave.samples());
+    stream.accept_waveform(wave.sample_rate(), &tail_padding);
+    stream.input_finished();
+
+    let mut detected = false;
+    while kws.is_ready(&stream) {
+        kws.decode(&stream);
+        if let Some(result) = kws.get_result(&stream) {
+            if !result.keyword.is_empty() {
+                detected = true;
+                // result.json 包含详细的检测元数据（置信度等）
+                println!("检测到关键词：{}", result.json);
+                kws.reset(&stream);
+            }
+        }
+    }
+
+    if !detected {
+        println!("未检测到关键词。");
+    }
+
+    println!();
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // 读取 WAV 音频文件
+    let wave = Wave::read(&args.wav)
+        .ok_or_else(|| anyhow::anyhow!("读取 WAV 文件失败：{}", args.wav))?;
+
+    // 配置关键词检测器
+    let mut config = KeywordSpotterConfig::default();
+    config.model_config.transducer.encoder = Some(args.encoder);
+    config.model_config.transducer.decoder = Some(args.decoder);
+    config.model_config.transducer.joiner  = Some(args.joiner);
+    config.model_config.tokens             = Some(args.tokens);
+    config.model_config.provider           = Some(args.provider);
+    config.model_config.num_threads        = args.num_threads;
+    config.model_config.debug              = args.debug;
+    config.keywords_file                   = Some(args.keywords_file);
+
+    // 创建关键词检测器
+    let kws = KeywordSpotter::create(&config)
+        .ok_or_else(|| anyhow::anyhow!("创建 KeywordSpotter 失败，请检查配置"))?;
+
+    // 场景一：仅使用预定义关键词
+    detect_keywords(
+        &kws,
+        &wave,
+        "--使用关键词文件中的预定义关键词--",
+        None,
+    );
+
+    // 场景二：预定义关键词 + 动态追加一个关键词
+    detect_keywords(
+        &kws,
+        &wave,
+        "--预定义关键词 + 追加一个新关键词--",
+        Some("y ǎn y uán @演员"),
+    );
+
+    // 场景三：预定义关键词 + 动态追加两个关键词
+    detect_keywords(
+        &kws,
+        &wave,
+        "--预定义关键词 + 追加两个新关键词--",
+        Some("y ǎn y uán @演员/zh ī m íng @知名"),
+    );
+
+    Ok(())
+}
+```
+
+---
+
+## 运行示例
+
+```bash
+cargo run --example keyword_spotter -- \
+  --wav ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav \
+  --encoder ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx \
+  --decoder ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx \
+  --joiner  ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx \
+  --tokens  ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt \
+  --keywords-file ./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt
+```
+
+---
+
+## 动态关键词格式
+
+```
+# 单个关键词：音素序列 + @显示标签
+y ǎn y uán @演员
+
+# 多个关键词：用 / 分隔
+y ǎn y uán @演员/zh ī m íng @知名
+```
+
+<Note>
+**`Option<String>` 使用方式**
+
+配置项中所有字符串路径字段均为 `Option<String>`：
+
+```rust
+// 正确写法
+config.model_config.tokens = Some("path/to/tokens.txt".to_string());
+
+// 不需要某字段时保持 None（默认值）
+// config.model_config.model_type = None; // 可省略，Default 已处理
+```
+
+`kws.get_result(&stream)` 同样返回 `Option<KeywordResult>`，推荐使用 `if let` 解构：
+
+```rust
+if let Some(result) = kws.get_result(&stream) {
+    if !result.keyword.is_empty() {
+        println!("检测到：{}", result.keyword);
+        kws.reset(&stream);
+    }
+}
+```
+</Note>
+
+---
+
+## 内存管理
+
+`KeywordSpotter` 和 `OnlineStream` 均实现了 `Drop` trait，离开作用域时自动释放原生 C 资源，无需手动调用析构函数。Rust 的所有权系统保证不会发生双重释放或内存泄漏。

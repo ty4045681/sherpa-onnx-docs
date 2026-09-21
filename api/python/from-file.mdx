@@ -1,0 +1,303 @@
+---
+title: "sherpa-onnx Python 关键词唤醒：读取本地 WAV 音频文件离线检测关键词的完整示例"
+sidebarTitle: "文件输入"
+description: "演示使用 sherpa-onnx Python KeywordSpotter 从本地 WAV 文件进行离线关键词唤醒检测，包含 read_wave 函数实现、0.66 秒尾部静音填充、预定义关键词与 create_stream 动态追加关键词三种完整可运行用法。"
+---
+
+本文展示如何使用 `sherpa-onnx` Python API 从本地 WAV 文件中检测预先定义的关键词。代码完全离线运行，支持两种关键词配置方式：使用 `keywords_file` 中的预定义关键词，以及在 `create_stream` 时动态追加额外关键词（仅对当前流有效）。
+
+---
+
+## 准备工作
+
+确保已安装 `sherpa-onnx` 及音频读取依赖：
+
+```bash
+pip install sherpa-onnx
+# 使用 wave 标准库读取，或安装 soundfile 支持更多格式
+pip install soundfile
+```
+
+下载预训练模型（以中文 WenetSpeech 模型为例）：
+
+```bash
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+```
+
+---
+
+## 完整示例代码
+
+```python
+#!/usr/bin/env python3
+"""
+使用 sherpa-onnx Python API 从 WAV 文件进行关键词唤醒检测。
+
+模型下载地址：
+https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html
+"""
+import wave
+from typing import Tuple
+
+import numpy as np
+import sherpa_onnx
+
+
+def read_wave(wave_filename: str) -> Tuple[np.ndarray, int]:
+    """
+    读取单声道 16-bit WAV 文件，返回归一化的 float32 数组及采样率。
+
+    Args:
+      wave_filename:
+        WAV 文件路径。要求单声道、16-bit，采样率不限（支持非 16kHz）。
+    Returns:
+      (samples, sample_rate)
+        samples: np.float32 数组，取值范围 [-1, 1]
+        sample_rate: 文件的采样率（Hz）
+    """
+    with wave.open(wave_filename) as f:
+        assert f.getnchannels() == 1, f.getnchannels()
+        assert f.getsampwidth() == 2, f.getsampwidth()  # 2 bytes = 16-bit
+        num_samples = f.getnframes()
+        samples = f.readframes(num_samples)
+        samples_int16 = np.frombuffer(samples, dtype=np.int16)
+        samples_float32 = samples_int16.astype(np.float32)
+        samples_float32 = samples_float32 / 32768
+        return samples_float32, f.getframerate()
+
+
+def create_keyword_spotter():
+    kws = sherpa_onnx.KeywordSpotter(
+        tokens="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt",
+        encoder="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        decoder="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+        joiner="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/joiner-epoch-12-avg-2-chunk-16-left-64.onnx",
+        num_threads=2,
+        keywords_file="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/test_keywords.txt",
+        provider="cpu",
+    )
+    return kws
+
+
+def main():
+    kws = create_keyword_spotter()
+
+    wave_filename = (
+        "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/3.wav"
+    )
+
+    samples, sample_rate = read_wave(wave_filename)
+
+    # 尾部填充：0.66 秒静音，确保音频末尾的所有帧均被处理
+    tail_paddings = np.zeros(int(0.66 * sample_rate), dtype=np.float32)
+
+    # ── 用法一：仅使用 keywords_file 中的预定义关键词 ──────────────────
+    print("----------Use pre-defined keywords----------")
+    s = kws.create_stream()
+    s.accept_waveform(sample_rate, samples)
+    s.accept_waveform(sample_rate, tail_paddings)
+    s.input_finished()
+    while kws.is_ready(s):
+        kws.decode_stream(s)
+        r = kws.get_result(s)
+        if r != "":
+            # Remember to call reset right after detected a keyword
+            kws.reset_stream(s)
+            print(f"Detected {r}")
+
+    # ── 用法二：预定义关键词 + 动态追加 1 个关键词 ────────────────────
+    print("----------Use pre-defined keywords + add a new keyword----------")
+    s = kws.create_stream("y ǎn y uán @演员")
+    s.accept_waveform(sample_rate, samples)
+    s.accept_waveform(sample_rate, tail_paddings)
+    s.input_finished()
+    while kws.is_ready(s):
+        kws.decode_stream(s)
+        r = kws.get_result(s)
+        if r != "":
+            # Remember to call reset right after detected a keyword
+            kws.reset_stream(s)
+            print(f"Detected {r}")
+
+    # ── 用法三：预定义关键词 + 动态追加 2 个关键词 ────────────────────
+    print("----------Use pre-defined keywords + add 2 new keywords----------")
+    s = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+    s.accept_waveform(sample_rate, samples)
+    s.accept_waveform(sample_rate, tail_paddings)
+    s.input_finished()
+    while kws.is_ready(s):
+        kws.decode_stream(s)
+        r = kws.get_result(s)
+        if r != "":
+            # Remember to call reset right after detected a keyword
+            kws.reset_stream(s)
+            print(f"Detected {r}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## 分步说明
+
+<Steps>
+  <Step title="初始化 KeywordSpotter">
+    使用模型路径和关键词文件创建 `KeywordSpotter` 实例。`keywords_file` 中已预定义了若干关键词，所有后续创建的流默认都会检测这些关键词。
+
+    ```python
+    kws = sherpa_onnx.KeywordSpotter(
+        tokens="./model/tokens.txt",
+        encoder="./model/encoder.onnx",
+        decoder="./model/decoder.onnx",
+        joiner="./model/joiner.onnx",
+        keywords_file="./model/test_keywords.txt",
+        num_threads=2,
+        provider="cpu",
+    )
+    ```
+  </Step>
+
+  <Step title="读取 WAV 文件">
+    使用 Python 标准库 `wave` 读取音频文件，并将 16-bit 整数样本归一化为 `float32` 浮点数（范围 `[-1, 1]`）：
+
+    ```python
+    import wave
+    import numpy as np
+
+    with wave.open("test.wav") as f:
+        num_samples = f.getnframes()
+        samples = f.readframes(num_samples)
+        samples_int16 = np.frombuffer(samples, dtype=np.int16)
+        samples_float32 = samples_int16.astype(np.float32) / 32768
+        sample_rate = f.getframerate()
+    ```
+
+    <Tip>
+      `read_wave` 函数要求 WAV 文件为**单声道**（mono）、**16-bit** 格式，但对采样率无限制。`sherpa-onnx` 内部的特征提取器会自动处理重采样。
+    </Tip>
+  </Step>
+
+  <Step title="准备尾部填充并创建流">
+    在音频末尾追加一段静音（`tail_paddings`），然后通知流音频输入已完成（`input_finished()`）：
+
+    ```python
+    # 追加 0.66 秒静音填充
+    tail_paddings = np.zeros(int(0.66 * sample_rate), dtype=np.float32)
+
+    # 用法一：仅使用预定义关键词
+    stream = kws.create_stream()
+
+    # 用法二：追加动态关键词
+    stream = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+
+    stream.accept_waveform(sample_rate, samples)
+    stream.accept_waveform(sample_rate, tail_paddings)
+    stream.input_finished()
+    ```
+
+    <Tip>
+      **`tail_paddings` 的作用**
+
+      流式 Transducer 模型在解码时，需要一定数量的"右侧上下文帧"（right context）才能处理当前帧。对于音频末尾的若干帧，如果直接结束输入，这些帧将因缺少右侧上下文而无法被处理，导致音频末尾附近的关键词被漏检。
+
+      追加约 **0.66 秒**（`int(0.66 * sample_rate)` 个采样点）的零值静音可以为最后几帧提供足够的右侧上下文，确保所有帧都被完整处理。
+    </Tip>
+  </Step>
+
+  <Step title="循环解码直到完成">
+    持续调用 `is_ready` + `decode_stream`，直到所有帧都被处理完毕：
+
+    ```python
+    while kws.is_ready(stream):
+        kws.decode_stream(stream)
+        r = kws.get_result(stream)
+        if r != "":
+            # 检测到关键词后，必须立即重置
+            kws.reset_stream(stream)
+            print(f"Detected {r}")
+    ```
+
+    `is_ready` 返回 `False` 时，说明当前缓冲的帧已全部处理完毕。
+  </Step>
+
+  <Step title="获取并打印结果">
+    `get_result` 返回检测到的关键词字符串；未检测到时返回 `""`（空字符串，不是 `None`）。检测到后**必须立即调用 `reset_stream`**，否则下次循环仍会返回同一结果，造成重复触发。
+
+    ```python
+    r = kws.get_result(stream)
+    if r != "":
+        print(f"Detected {r}")
+        kws.reset_stream(stream)  # 重置，准备检测下一个关键词
+    ```
+  </Step>
+</Steps>
+
+---
+
+## 两种关键词用法对比
+
+### 用法一：使用 `keywords_file` 预定义关键词
+
+适用于关键词集合固定且在初始化时已知的场景。所有流均共享同一份关键词列表：
+
+```python
+# keywords_file 在构造函数中已指定
+# create_stream() 不传参数，使用预定义关键词
+stream = kws.create_stream()
+```
+
+`test_keywords.txt` 内容示例：
+```text
+x iǎo ài t óng x ué
+n ǐ h ǎo sh ì j iè
+```
+
+### 用法二：`create_stream` 时动态追加关键词
+
+适用于需要按会话或用户实时添加关键词的场景。动态追加的关键词**仅对当前流有效**，不影响其他流。
+
+```python
+# 追加单个关键词，格式：拼音音节（空格分隔）+ @显示文本
+stream = kws.create_stream("y ǎn y uán @演员")
+
+# 追加多个关键词，以 "/" 分隔
+stream = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+```
+
+**关键词格式说明：**
+
+| 字段             | 说明                                                         | 示例                    |
+| ---------------- | ------------------------------------------------------------ | ----------------------- |
+| 音节序列         | 用空格分隔的拼音音节（中文）或 BPE Token（英文）             | `y ǎn y uán`            |
+| `@显示文本`      | 可选，检测到时 `get_result` 返回此文本而非拼音序列           | `@演员`                 |
+| `/` 分隔符       | 在同一字符串中追加多个关键词时使用                           | `关键词1/关键词2`       |
+
+---
+
+## 预期输出
+
+运行上述完整代码，若音频文件中包含关键词，输出示例如下：
+
+```text
+----------Use pre-defined keywords----------
+Detected 小爱同学
+----------Use pre-defined keywords + add a new keyword----------
+Detected 小爱同学
+Detected 演员
+----------Use pre-defined keywords + add 2 new keywords----------
+Detected 小爱同学
+Detected 演员
+Detected 知名
+```
+
+---
+
+## 相关链接
+
+- [安装 sherpa-onnx Python 包](/api/python/installation)
+- [KeywordSpotter 类 API 参考](/api/python/keyword-spotter-class)
+- [从麦克风实时检测关键词](/api/python/from-microphone)
+- [预训练模型列表](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)

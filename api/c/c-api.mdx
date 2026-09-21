@@ -1,0 +1,542 @@
+---
+title: "sherpa-onnx KWS C API 关键词检测配置与函数完整参考"
+sidebarTitle: "C API"
+description: "sherpa-onnx KWS C 语言 API 完整参考文档，涵盖 SherpaOnnxKeywordSpotterConfig 配置结构体、所有 C API 函数签名、真实代码示例及常见错误处理说明。"
+---
+
+sherpa-onnx 提供纯 C 风格的关键词唤醒（Keyword Spotting，KWS）接口，定义于头文件 `sherpa-onnx/c-api/c-api.h`。所有函数以 `SherpaOnnx` 为前缀，遵循"创建 → 使用 → 销毁"的生命周期模式，资源管理由调用方负责，不依赖任何 C++ 运行时，可在嵌入式系统、游戏引擎插件、FFI 绑定等场景中直接使用。
+
+## 概述
+
+C API 适用于以下场景：
+
+- **嵌入式与 IoT 设备**：MCU/MPU 等资源受限平台，仅支持 C 链接的运行时
+- **游戏引擎**：Unity、Unreal 等引擎通过 C Plugin 集成原生库
+- **跨语言 FFI**：Python `ctypes`、Rust `bindgen`、Swift `clang importer` 等通过 C ABI 调用
+- **系统级集成**：操作系统守护进程、驱动层程序等不适合引入 C++ 运行时的场景
+
+---
+
+## 配置结构体
+
+### SherpaOnnxKeywordSpotterConfig
+
+创建关键词唤醒器之前需要填写该配置结构体。建议使用 `memset` 将其清零，再逐字段赋值，以确保未显式设置的字段取默认值（`0` / `NULL`）。
+
+```c
+SherpaOnnxKeywordSpotterConfig config;
+memset(&config, 0, sizeof(config));
+```
+
+<ParamField path="model_config.transducer.encoder" type="const char *" required>
+  Encoder ONNX 模型文件路径。推荐使用 INT8 量化版本（`*.int8.onnx`）以降低内存占用。
+</ParamField>
+
+<ParamField path="model_config.transducer.decoder" type="const char *" required>
+  Decoder ONNX 模型文件路径。
+</ParamField>
+
+<ParamField path="model_config.transducer.joiner" type="const char *" required>
+  Joiner ONNX 模型文件路径。推荐使用 INT8 量化版本。
+</ParamField>
+
+<ParamField path="model_config.tokens" type="const char *">
+  词表文件（`tokens.txt`）路径，每行一个 token。与 `tokens_buf` / `tokens_buf_size` 二选一。
+</ParamField>
+
+<ParamField path="model_config.tokens_buf" type="const char *">
+  词表文件的内存 buffer 指针，用于从内存直接加载 tokens，避免磁盘 I/O。需配合 `tokens_buf_size` 使用。
+</ParamField>
+
+<ParamField path="model_config.tokens_buf_size" type="int32_t">
+  `tokens_buf` 的字节长度。
+</ParamField>
+
+<ParamField path="model_config.provider" type="const char *" default="cpu">
+  推理后端，可选 `"cpu"`、`"cuda"`、`"coreml"`、`"directml"` 等。
+</ParamField>
+
+<ParamField path="model_config.num_threads" type="int32_t" default="1">
+  CPU 推理线程数。多核设备可适当增大以提升实时率。
+</ParamField>
+
+<ParamField path="model_config.debug" type="int32_t" default="0">
+  调试开关，设为 `1` 时会在 stderr 打印模型加载与推理日志。
+</ParamField>
+
+<ParamField path="keywords_file" type="const char *">
+  关键词列表文件路径（`keywords.txt`），每行格式为音素序列加可选显示标签，例如：
+  ```
+  y ǎn y uán @演员
+  zh ī m íng @知名
+  ```
+  与 `keywords_buf` / `keywords_buf_size` 二选一。
+</ParamField>
+
+<ParamField path="keywords_buf" type="const char *">
+  关键词文件的内存 buffer 指针，用于从内存直接加载关键词列表。需配合 `keywords_buf_size` 使用。
+</ParamField>
+
+<ParamField path="keywords_buf_size" type="int32_t">
+  `keywords_buf` 的字节长度。
+</ParamField>
+
+<ParamField path="max_active_paths" type="int32_t" default="4">
+  Beam Search 保留的最大激活路径数，数值越大精度越高，计算量也越大。
+</ParamField>
+
+<ParamField path="keywords_score" type="float" default="1.0">
+  关键词 token 的分数加成，数值越大越容易触发，但可能增加误唤醒率。推荐范围 `1.0` 到 `5.0`。
+</ParamField>
+
+<ParamField path="keywords_threshold" type="float" default="0.25">
+  触发关键词所需的置信度阈值，取值范围 `[0, 1]`，越大越难触发。
+</ParamField>
+
+<ParamField path="num_trailing_blanks" type="int32_t" default="1">
+  关键词结尾所需的 blank 帧数，用于稳定边界检测。
+</ParamField>
+
+---
+
+## 完整使用流程
+
+<Steps>
+  <Step title="初始化配置（memset 清零 + 填写字段）">
+    使用 `memset` 将结构体清零后再赋值，防止野指针或随机值导致崩溃：
+
+    ```c
+    #include "sherpa-onnx/c-api/c-api.h"
+    #include <string.h>
+
+    SherpaOnnxKeywordSpotterConfig config;
+    memset(&config, 0, sizeof(config));
+
+    config.model_config.transducer.encoder =
+        "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+        "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx";
+
+    config.model_config.transducer.decoder =
+        "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+        "decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+
+    config.model_config.transducer.joiner =
+        "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+        "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx";
+
+    config.model_config.tokens =
+        "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/tokens.txt";
+
+    config.model_config.provider    = "cpu";
+    config.model_config.num_threads = 1;
+    config.model_config.debug       = 1;
+
+    config.keywords_file =
+        "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+        "test_wavs/test_keywords.txt";
+
+    config.max_active_paths    = 4;
+    config.keywords_score      = 3.0f;
+    config.keywords_threshold  = 0.1f;
+    ```
+  </Step>
+
+  <Step title="创建 Spotter（SherpaOnnxCreateKeywordSpotter）">
+    调用工厂函数创建关键词唤醒器实例。若配置有误（路径不存在、模型格式错误等）则返回 `NULL`：
+
+    ```c
+    const SherpaOnnxKeywordSpotter *kws =
+        SherpaOnnxCreateKeywordSpotter(&config);
+    if (!kws) {
+        fprintf(stderr, "Please check your config\n");
+        exit(-1);
+    }
+    ```
+  </Step>
+
+  <Step title="读取音频并创建 Stream（SherpaOnnxCreateKeywordStream）">
+    每一路音频对应一个独立的 `SherpaOnnxOnlineStream`。可以使用内置的 WAV 读取工具，也可以自行提供 PCM 数据：
+
+    ```c
+    const SherpaOnnxWave *wave = SherpaOnnxReadWave("test.wav");
+    if (wave == NULL) {
+        fprintf(stderr, "Failed to read wav\n");
+        exit(-1);
+    }
+
+    // 创建默认流（使用 config 中预定义的关键词列表）
+    const SherpaOnnxOnlineStream *stream =
+        SherpaOnnxCreateKeywordStream(kws);
+
+    // 或：在预定义关键词基础上，追加运行时自定义关键词
+    // const SherpaOnnxOnlineStream *stream =
+    //     SherpaOnnxCreateKeywordStreamWithKeywords(kws, "y ǎn y uán @演员");
+    ```
+  </Step>
+
+  <Step title="输入音频帧（SherpaOnnxOnlineStreamAcceptWaveform）">
+    将 PCM 浮点数组（`float`，幅值范围 `-1` 到 `1`）连同采样率一起送入流。末尾建议追加约 0.3 到 0.5 秒的静音填充（tail padding）以冲刷解码器缓冲区：
+
+    ```c
+    float tail_paddings[8000] = {0};  // 0.5 秒 @ 16 kHz
+
+    SherpaOnnxOnlineStreamAcceptWaveform(
+        stream, wave->sample_rate,
+        wave->samples, wave->num_samples);
+
+    // 追加尾部静音填充
+    SherpaOnnxOnlineStreamAcceptWaveform(
+        stream, wave->sample_rate,
+        tail_paddings, sizeof(tail_paddings) / sizeof(float));
+
+    // 通知解码器输入已结束（文件模式）
+    SherpaOnnxOnlineStreamInputFinished(stream);
+    ```
+  </Step>
+
+  <Step title="循环解码并获取结果（SherpaOnnxIsKeywordStreamReady / SherpaOnnxDecodeKeywordStream / SherpaOnnxGetKeywordResult）">
+    在 `SherpaOnnxIsKeywordStreamReady` 返回 `1` 时持续调用 `SherpaOnnxDecodeKeywordStream` 消费帧缓冲，每次解码后立即查询结果：
+
+    ```c
+    while (SherpaOnnxIsKeywordStreamReady(kws, stream)) {
+        SherpaOnnxDecodeKeywordStream(kws, stream);
+        const SherpaOnnxKeywordResult *r =
+            SherpaOnnxGetKeywordResult(kws, stream);
+
+        if (r && r->json && strlen(r->keyword)) {
+            fprintf(stderr, "Detected keyword: %s\n", r->json);
+            // r->keyword   —— 触发的关键词字符串
+            // r->json      —— 包含 keyword/tokens/timestamps/start_time 的 JSON
+            SherpaOnnxResetKeywordStream(kws, stream);  // 检测到后必须立即重置
+        }
+        SherpaOnnxDestroyKeywordResult(r);
+    }
+    ```
+
+    在实时流场景中，该循环嵌套于音频采集回调内部，每次收到新帧后调用。
+  </Step>
+
+  <Step title="释放资源（SherpaOnnxDestroyOnlineStream + SherpaOnnxDestroyKeywordSpotter）">
+    程序退出前按照"先销毁流，再销毁 Spotter"的顺序释放所有资源：
+
+    ```c
+    SherpaOnnxDestroyOnlineStream(stream);
+    SherpaOnnxFreeWave(wave);
+    SherpaOnnxDestroyKeywordSpotter(kws);
+    ```
+  </Step>
+</Steps>
+
+---
+
+## 完整示例代码
+
+### 示例一：基本用法 + 运行时动态关键词
+
+以下示例来自 [`c-api-examples/kws-c-api.c`](https://github.com/k2-fsa/sherpa-onnx/blob/master/c-api-examples/kws-c-api.c)，展示了三种关键词流的创建方式：
+
+```c
+// c-api-examples/kws-c-api.c
+// Copyright (c) 2025 Xiaomi Corporation
+//
+// 模型下载：
+// wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+// tar xvf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile.tar.bz2
+
+#include <stdio.h>
+#include <stdlib.h>  // exit
+#include <string.h>  // memset
+
+#include "sherpa-onnx/c-api/c-api.h"
+
+int32_t main() {
+  SherpaOnnxKeywordSpotterConfig config;
+  memset(&config, 0, sizeof(config));
+
+  config.model_config.transducer.encoder =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx";
+  config.model_config.transducer.decoder =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+  config.model_config.transducer.joiner =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx";
+  config.model_config.tokens =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "tokens.txt";
+  config.model_config.provider    = "cpu";
+  config.model_config.num_threads = 1;
+  config.model_config.debug       = 1;
+  config.keywords_file =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "test_wavs/test_keywords.txt";
+
+  const SherpaOnnxKeywordSpotter *kws =
+      SherpaOnnxCreateKeywordSpotter(&config);
+  if (!kws) {
+    fprintf(stderr, "Please check your config\n");
+    exit(-1);
+  }
+
+  const char *wav_filename =
+      "./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "test_wavs/3.wav";
+
+  float tail_paddings[8000] = {0};  // 0.5 秒静音填充
+
+  const SherpaOnnxWave *wave = SherpaOnnxReadWave(wav_filename);
+  if (wave == NULL) {
+    fprintf(stderr, "Failed to read %s\n", wav_filename);
+    exit(-1);
+  }
+
+  // ---- 场景 1：仅使用预定义关键词列表 ----
+  fprintf(stderr, "--Test pre-defined keywords from test_wavs/test_keywords.txt--\n");
+
+  const SherpaOnnxOnlineStream *stream = SherpaOnnxCreateKeywordStream(kws);
+  SherpaOnnxOnlineStreamAcceptWaveform(stream, wave->sample_rate,
+                                       wave->samples, wave->num_samples);
+  SherpaOnnxOnlineStreamAcceptWaveform(stream, wave->sample_rate,
+                                       tail_paddings,
+                                       sizeof(tail_paddings) / sizeof(float));
+  SherpaOnnxOnlineStreamInputFinished(stream);
+
+  while (SherpaOnnxIsKeywordStreamReady(kws, stream)) {
+    SherpaOnnxDecodeKeywordStream(kws, stream);
+    const SherpaOnnxKeywordResult *r = SherpaOnnxGetKeywordResult(kws, stream);
+    if (r && r->json && strlen(r->keyword)) {
+      fprintf(stderr, "Detected keyword: %s\n", r->json);
+      SherpaOnnxResetKeywordStream(kws, stream);  // 检测到后立即重置！
+    }
+    SherpaOnnxDestroyKeywordResult(r);
+  }
+  SherpaOnnxDestroyOnlineStream(stream);
+
+  // ---- 场景 2：预定义关键词 + 运行时追加 1 个新关键词 ----
+  fprintf(stderr, "--Use pre-defined keywords + add a new keyword--\n");
+
+  stream = SherpaOnnxCreateKeywordStreamWithKeywords(kws, "y ǎn y uán @演员");
+  SherpaOnnxOnlineStreamAcceptWaveform(stream, wave->sample_rate,
+                                       wave->samples, wave->num_samples);
+  SherpaOnnxOnlineStreamAcceptWaveform(stream, wave->sample_rate,
+                                       tail_paddings,
+                                       sizeof(tail_paddings) / sizeof(float));
+  SherpaOnnxOnlineStreamInputFinished(stream);
+
+  while (SherpaOnnxIsKeywordStreamReady(kws, stream)) {
+    SherpaOnnxDecodeKeywordStream(kws, stream);
+    const SherpaOnnxKeywordResult *r = SherpaOnnxGetKeywordResult(kws, stream);
+    if (r && r->json && strlen(r->keyword)) {
+      fprintf(stderr, "Detected keyword: %s\n", r->json);
+      SherpaOnnxResetKeywordStream(kws, stream);
+    }
+    SherpaOnnxDestroyKeywordResult(r);
+  }
+  SherpaOnnxDestroyOnlineStream(stream);
+
+  // ---- 场景 3：预定义关键词 + 运行时追加 2 个新关键词（用 / 分隔）----
+  fprintf(stderr, "--Use pre-defined keywords + add two new keywords--\n");
+
+  stream = SherpaOnnxCreateKeywordStreamWithKeywords(
+      kws, "y ǎn y uán @演员/zh ī m íng @知名");
+  SherpaOnnxOnlineStreamAcceptWaveform(stream, wave->sample_rate,
+                                       wave->samples, wave->num_samples);
+  SherpaOnnxOnlineStreamAcceptWaveform(stream, wave->sample_rate,
+                                       tail_paddings,
+                                       sizeof(tail_paddings) / sizeof(float));
+  SherpaOnnxOnlineStreamInputFinished(stream);
+
+  while (SherpaOnnxIsKeywordStreamReady(kws, stream)) {
+    SherpaOnnxDecodeKeywordStream(kws, stream);
+    const SherpaOnnxKeywordResult *r = SherpaOnnxGetKeywordResult(kws, stream);
+    if (r && r->json && strlen(r->keyword)) {
+      fprintf(stderr, "Detected keyword: %s\n", r->json);
+      SherpaOnnxResetKeywordStream(kws, stream);
+    }
+    SherpaOnnxDestroyKeywordResult(r);
+  }
+  SherpaOnnxDestroyOnlineStream(stream);
+
+  SherpaOnnxFreeWave(wave);
+  SherpaOnnxDestroyKeywordSpotter(kws);
+  return 0;
+}
+```
+
+<Note>
+  **动态关键词语法**：`SherpaOnnxCreateKeywordStreamWithKeywords` 的第二个参数为字符串，多个关键词之间以 `/` 分隔，每个关键词内音素（BPE token / CJK 字符）以空格分隔，`@` 后接可读的显示标签（出现在结果的 `keyword` 字段中）。
+</Note>
+
+---
+
+### 示例二：从内存 Buffer 加载 Tokens 和 Keywords
+
+以下示例来自 [`c-api-examples/keywords-spotter-buffered-tokens-keywords-c-api.c`](https://github.com/k2-fsa/sherpa-onnx/blob/master/c-api-examples/keywords-spotter-buffered-tokens-keywords-c-api.c)，展示了如何将 `tokens.txt` 和 `keywords.txt` 先读取到内存，再通过 `tokens_buf` / `keywords_buf` 字段传入配置，适用于将资源打包进可执行文件或加密存储的场景：
+
+```c
+// c-api-examples/keywords-spotter-buffered-tokens-keywords-c-api.c
+// Copyright (c) 2024 Xiaomi Corporation / Luo Xiao
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "sherpa-onnx/c-api/c-api.h"
+
+// 辅助函数：将文件完整读取到堆分配的 buffer
+static size_t ReadFile(const char *filename, const char **buffer_out) {
+  FILE *file = fopen(filename, "r");
+  if (file == NULL) {
+    fprintf(stderr, "Failed to open %s\n", filename);
+    return -1;
+  }
+  fseek(file, 0L, SEEK_END);
+  long size = ftell(file);
+  rewind(file);
+  *buffer_out = malloc(size);
+  if (*buffer_out == NULL) { fclose(file); return -1; }
+  size_t read_bytes = fread((void *)*buffer_out, 1, size, file);
+  fclose(file);
+  return (read_bytes == (size_t)size) ? read_bytes : -1;
+}
+
+int32_t main() {
+  // 1. 读取 tokens.txt 和 keywords.txt 到内存
+  const char *tokens_buf;
+  size_t token_buf_size = ReadFile(
+      "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/tokens.txt",
+      &tokens_buf);
+
+  const char *keywords_buf;
+  size_t keywords_buf_size = ReadFile(
+      "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "test_wavs/test_keywords.txt",
+      &keywords_buf);
+
+  // 2. 填写配置：使用 buf 字段替代文件路径字段
+  SherpaOnnxKeywordSpotterConfig config;
+  memset(&config, 0, sizeof(config));
+
+  config.model_config.transducer.encoder =
+      "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx";
+  config.model_config.transducer.decoder =
+      "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+  config.model_config.transducer.joiner =
+      "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx";
+
+  // 注意：使用 buf 方式时，tokens 字段留空（NULL / 0）
+  config.model_config.tokens_buf      = tokens_buf;
+  config.model_config.tokens_buf_size = token_buf_size;
+  config.model_config.provider        = "cpu";
+  config.model_config.num_threads     = 1;
+  config.model_config.debug           = 1;
+
+  config.max_active_paths    = 4;
+  config.keywords_score      = 3.0f;
+  config.keywords_threshold  = 0.1f;
+  // 同样用 buf 字段替代 keywords_file
+  config.keywords_buf        = keywords_buf;
+  config.keywords_buf_size   = keywords_buf_size;
+
+  // 3. 创建 Spotter（buffer 传入后即可释放）
+  const SherpaOnnxKeywordSpotter *kws =
+      SherpaOnnxCreateKeywordSpotter(&config);
+
+  free((void *)tokens_buf);
+  free((void *)keywords_buf);
+
+  if (!kws) {
+    fprintf(stderr, "Please check your config!\n");
+    return -1;
+  }
+
+  // 4. 模拟流式输入（每次送入 N=3200 个采样点）
+  const SherpaOnnxWave *wave = SherpaOnnxReadWave(
+      "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile/"
+      "test_wavs/6.wav");
+
+  const SherpaOnnxOnlineStream *stream =
+      SherpaOnnxCreateKeywordStream(kws);
+
+#define N 3200
+  int32_t k = 0;
+  while (k < wave->num_samples) {
+    int32_t start = k;
+    int32_t end   = (start + N > wave->num_samples)
+                        ? wave->num_samples : (start + N);
+    k += N;
+
+    SherpaOnnxOnlineStreamAcceptWaveform(
+        stream, wave->sample_rate, wave->samples + start, end - start);
+
+    while (SherpaOnnxIsKeywordStreamReady(kws, stream)) {
+      SherpaOnnxDecodeKeywordStream(kws, stream);
+    }
+
+    const SherpaOnnxKeywordResult *r =
+        SherpaOnnxGetKeywordResult(kws, stream);
+    if (r && strlen(r->keyword)) {
+      fprintf(stderr, "Detected: %s\n", r->keyword);
+      SherpaOnnxResetKeywordStream(kws, stream);
+    }
+    SherpaOnnxDestroyKeywordResult(r);
+  }
+
+  // 5. 尾部填充并等待解码完成
+  float tail_paddings[4800] = {0};  // 0.3 秒 @ 16 kHz
+  SherpaOnnxOnlineStreamAcceptWaveform(
+      stream, wave->sample_rate, tail_paddings, 4800);
+  SherpaOnnxOnlineStreamInputFinished(stream);
+
+  while (SherpaOnnxIsKeywordStreamReady(kws, stream)) {
+    SherpaOnnxDecodeKeywordStream(kws, stream);
+  }
+
+  // 6. 释放资源
+  SherpaOnnxDestroyOnlineStream(stream);
+  SherpaOnnxFreeWave(wave);
+  SherpaOnnxDestroyKeywordSpotter(kws);
+  return 0;
+}
+```
+
+<Tip>
+  **Buffer 加载的优势**：将模型资源嵌入可执行文件（如 `xxd -i tokens.txt > tokens_embed.c`），或从加密/网络数据流中直接解密到内存后传入 `tokens_buf`，无需在磁盘上留下明文文件，适合对资源保护有要求的商业应用。
+</Tip>
+
+---
+
+## API 函数参考
+
+| 函数 | 说明 |
+|---|---|
+| `SherpaOnnxCreateKeywordSpotter(config)` | 根据配置创建关键词唤醒器，失败返回 `NULL` |
+| `SherpaOnnxDestroyKeywordSpotter(kws)` | 销毁唤醒器并释放所有内部资源 |
+| `SherpaOnnxCreateKeywordStream(kws)` | 创建使用预定义关键词列表的解码流 |
+| `SherpaOnnxCreateKeywordStreamWithKeywords(kws, keywords)` | 创建在预定义列表基础上追加自定义关键词的解码流 |
+| `SherpaOnnxIsKeywordStreamReady(kws, stream)` | 返回 `1` 表示流中有足够帧可供解码，否则返回 `0` |
+| `SherpaOnnxDecodeKeywordStream(kws, stream)` | 消费一批帧进行解码，需在 `IsReady` 为真时调用 |
+| `SherpaOnnxDecodeMultipleKeywordStreams(kws, streams, n)` | 批量并发解码多路就绪流，`streams` 为指针数组，`n` 为数组长度 |
+| `SherpaOnnxGetKeywordResult(kws, stream)` | 获取当前解码结果，`keyword` 非空表示触发了关键词 |
+| `SherpaOnnxDestroyKeywordResult(result)` | 释放 `SherpaOnnxGetKeywordResult` 返回的结果对象 |
+| `SherpaOnnxResetKeywordStream(kws, stream)` | 检测到关键词后重置流状态，使其可继续监听 |
+| `SherpaOnnxOnlineStreamAcceptWaveform(stream, sr, samples, n)` | 向流送入 PCM 浮点音频帧（`float[]`，幅值范围 `-1` 到 `1`） |
+| `SherpaOnnxOnlineStreamInputFinished(stream)` | 通知解码器输入已结束（文件/离线场景） |
+| `SherpaOnnxDestroyOnlineStream(stream)` | 销毁流对象并释放缓冲区 |
+| `SherpaOnnxReadWave(filename)` | 读取 16-bit PCM WAV 文件，返回 `SherpaOnnxWave *` |
+| `SherpaOnnxFreeWave(wave)` | 释放 `SherpaOnnxReadWave` 返回的 Wave 对象 |
+| `SherpaOnnxCreateDisplay(max_word_per_line)` | 创建终端显示辅助对象（用于美化打印） |
+| `SherpaOnnxPrint(display, segment_id, text)` | 通过显示对象打印识别文本 |
+| `SherpaOnnxDestroyDisplay(display)` | 销毁显示对象 |
+
+<Warning>
+  **常见陷阱**：
+
+  1. 检测到关键词后**必须调用** `SherpaOnnxResetKeywordStream`，否则同一关键词会持续重复报告。
+  2. `SherpaOnnxGetKeywordResult` 返回的指针必须用 `SherpaOnnxDestroyKeywordResult` 释放，不可直接 `free()`。
+  3. `keywords_file` 与 `keywords_buf`/`keywords_buf_size` 互斥，两者同时设置时 buf 优先。
+  4. `SherpaOnnxCreateKeywordSpotter` 调用完成后，`tokens_buf` 和 `keywords_buf` 可以安全释放（如示例中所示），库内部已完成复制。
+</Warning>

@@ -1,0 +1,418 @@
+---
+title: "sherpa-onnx Dart/Flutter 绑定：关键词唤醒开发实战指南"
+sidebarTitle: "Dart/Flutter"
+description: "使用 sherpa_onnx Flutter 插件在 Android、iOS 和桌面端实现关键词唤醒，涵盖 KeywordSpotter 配置、流式解码、麦克风实时检测及资源释放指南。"
+---
+
+sherpa_onnx Flutter 插件通过 Dart FFI 直接调用原生 C 库，提供了 `KeywordSpotter` 类封装完整的关键词唤醒流程。支持流式（在线）推理，可持续监听麦克风输入并实时检测关键词。
+
+---
+
+## 支持平台
+
+<CardGroup cols={3}>
+  <Card title="Android" icon="android">
+    ARM64-v8a、ARMv7a、x86_64
+  </Card>
+  <Card title="iOS" icon="apple">
+    ARM64（真机）、x86_64（模拟器）
+  </Card>
+  <Card title="macOS" icon="apple">
+    Apple Silicon（ARM64）与 Intel（x86_64）
+  </Card>
+  <Card title="Windows" icon="windows">
+    x64，需 MSVC 运行时
+  </Card>
+  <Card title="Linux" icon="linux">
+    x64、ARM64，基于 glibc
+  </Card>
+  <Card title="Web / WASM" icon="globe">
+    通过 WebAssembly 支持浏览器端运行
+  </Card>
+</CardGroup>
+
+---
+
+## 安装
+
+在 `pubspec.yaml` 中添加依赖：
+
+```yaml
+dependencies:
+  sherpa_onnx: ^1.0.0
+```
+
+然后运行：
+
+```bash
+flutter pub get
+```
+
+---
+
+## 下载模型
+
+从 [kws-models Release 页面](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) 下载适合目标平台的模型，并将其打包到 Flutter 应用的 assets 中，或在运行时下载到设备存储。
+
+```yaml
+# pubspec.yaml 中注册 assets（如将模型放入 assets/ 目录）
+flutter:
+  assets:
+    - assets/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
+```
+
+---
+
+## `KeywordSpotterConfig` 配置说明
+
+### 特征提取配置（`FeatConfig`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sampleRate` | `int` | 音频采样率，通常为 `16000` |
+| `featureDim` | `int` | Fbank 特征维度，通常为 `80` |
+
+### 模型配置（`OnlineModelConfig`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `transducer.encoder` | `String` | Encoder ONNX 路径 |
+| `transducer.decoder` | `String` | Decoder ONNX 路径 |
+| `transducer.joiner` | `String` | Joiner ONNX 路径 |
+| `tokens` | `String` | 词表文件路径 |
+| `numThreads` | `int` | 推理线程数 |
+| `provider` | `String` | 推理后端（`"cpu"` / `"cuda"` / `"coreml"`） |
+| `debug` | `bool` | 是否开启调试日志 |
+| `modelType` | `String` | 模型类型（可选，留空自动推断） |
+
+### `KeywordSpotterConfig` 顶层字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `feat` | `FeatureConfig` | 特征提取配置 |
+| `model` | `OnlineModelConfig` | 模型配置 |
+| `keywordsFile` | `String` | 预定义关键词文件路径 |
+| `keywordsBuf` | `String` | 内联关键词字符串（与文件二选一或并用） |
+| `keywordsScore` | `double` | 关键词得分阈值 |
+| `keywordsThreshold` | `double` | 检测置信度阈值 |
+| `numTrailingBlanks` | `int` | 触发检测所需的尾部空白帧数 |
+| `maxActivePaths` | `int` | Beam Search 最大活跃路径数 |
+
+---
+
+## 核心 API
+
+### `KeywordSpotter(config)` 构造函数
+
+根据 `KeywordSpotterConfig` 创建关键词检测器。配置有误时抛出 `Exception`。
+
+### `kws.createStream({String keywords = ''}) → OnlineStream`
+
+创建音频输入流：
+- 不传 `keywords`（或传空字符串）：使用 `keywordsFile` 中的预定义关键词。
+- 传入 `keywords`：在预定义关键词基础上动态追加指定关键词。
+
+### `stream.acceptWaveform({required Float32List samples, required int sampleRate})`
+
+向流中写入 PCM 音频数据。
+
+### `kws.isReady(stream) → bool`
+
+判断是否有足够帧数可执行解码。
+
+### `kws.decode(stream)`
+
+执行一次增量解码。
+
+### `kws.getResult(stream) → KeywordResult`
+
+获取当前检测结果。`result.keyword` 为空字符串时表示未检测到关键词。
+
+### `kws.reset(stream)`
+
+**检测到关键词后立即调用**，重置流内部状态以继续监听。
+
+### `kws.free()`
+
+释放检测器占用的原生 C 内存。Dart GC 无法管理 FFI 原生资源，**必须手动调用**。
+
+---
+
+## 基础用法（从文件检测）
+
+```dart
+import 'dart:typed_data';
+import 'package:sherpa_onnx/sherpa_onnx.dart';
+
+Future<void> runKeywordSpotting() async {
+  // ── 1. 配置 ───────────────────────────────────────────────────
+  final config = KeywordSpotterConfig(
+    feat: FeatureConfig(
+      sampleRate: 16000,
+      featureDim: 80,
+    ),
+    model: OnlineModelConfig(
+      transducer: OnlineTransducerModelConfig(
+        encoder: './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/'
+            'encoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+        decoder: './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/'
+            'decoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+        joiner: './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/'
+            'joiner-epoch-12-avg-2-chunk-16-left-64.onnx',
+      ),
+      tokens: './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt',
+      numThreads: 1,
+      provider: 'cpu',
+      debug: false,
+    ),
+    keywordsFile: './sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/'
+        'test_wavs/test_keywords.txt',
+  );
+
+  // ── 2. 创建检测器 ──────────────────────────────────────────────
+  final kws = KeywordSpotter(config);
+
+  // ── 3. 使用预定义关键词流 ─────────────────────────────────────
+  final stream = kws.createStream();
+
+  // 模拟读取音频（实际使用中替换为麦克风数据或文件数据）
+  final samples = Float32List(16000); // 1 秒静音示例
+  stream.acceptWaveform(sampleRate: 16000, samples: samples);
+
+  while (kws.isReady(stream)) {
+    kws.decode(stream);
+    final result = kws.getResult(stream);
+    if (result.keyword.isNotEmpty) {
+      print('检测到关键词：${result.keyword}');
+      kws.reset(stream); // 立即重置，继续监听
+    }
+  }
+
+  // ── 4. 动态追加关键词 ─────────────────────────────────────────
+  final stream2 = kws.createStream(keywords: 'y ǎn y uán @演员');
+  stream2.acceptWaveform(sampleRate: 16000, samples: samples);
+
+  while (kws.isReady(stream2)) {
+    kws.decode(stream2);
+    final result = kws.getResult(stream2);
+    if (result.keyword.isNotEmpty) {
+      print('动态关键词检测到：${result.keyword}');
+      kws.reset(stream2);
+    }
+  }
+
+  // ── 5. 释放资源 ───────────────────────────────────────────────
+  stream.free();
+  stream2.free();
+  kws.free(); // 必须调用！
+}
+```
+
+---
+
+## Flutter 应用完整集成示例（流式麦克风处理）
+
+以下示例展示在 Flutter Widget 中持续监听麦克风并实时检测关键词的完整模式：
+
+```dart
+import 'dart:async';
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:sherpa_onnx/sherpa_onnx.dart';
+
+class KeywordSpotterWidget extends StatefulWidget {
+  const KeywordSpotterWidget({super.key});
+
+  @override
+  State<KeywordSpotterWidget> createState() => _KeywordSpotterWidgetState();
+}
+
+class _KeywordSpotterWidgetState extends State<KeywordSpotterWidget> {
+  KeywordSpotter? _kws;
+  OnlineStream? _stream;
+  String _lastKeyword = '等待关键词...';
+  bool _isListening = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initKws();
+  }
+
+  /// 初始化关键词检测器
+  void _initKws() {
+    final config = KeywordSpotterConfig(
+      feat: FeatureConfig(sampleRate: 16000, featureDim: 80),
+      model: OnlineModelConfig(
+        transducer: OnlineTransducerModelConfig(
+          // 生产环境中使用 path_provider 获取设备存储路径
+          encoder: 'path/to/encoder.onnx',
+          decoder: 'path/to/decoder.onnx',
+          joiner:  'path/to/joiner.onnx',
+        ),
+        tokens:     'path/to/tokens.txt',
+        numThreads: 2,
+        provider:   'cpu',
+        debug:      false,
+      ),
+      keywordsFile: 'path/to/test_keywords.txt',
+    );
+
+    _kws = KeywordSpotter(config);
+    _stream = _kws!.createStream();
+  }
+
+  /// 处理一批音频帧（由麦克风回调触发）
+  void _processAudioChunk(Float32List samples, int sampleRate) {
+    if (_kws == null || _stream == null) return;
+
+    _stream!.acceptWaveform(sampleRate: sampleRate, samples: samples);
+
+    while (_kws!.isReady(_stream!)) {
+      _kws!.decode(_stream!);
+      final result = _kws!.getResult(_stream!);
+
+      if (result.keyword.isNotEmpty) {
+        setState(() {
+          _lastKeyword = '✅ 检测到：${result.keyword}';
+        });
+
+        // 检测到关键词后立即重置流
+        _kws!.reset(_stream!);
+
+        // 在此处触发业务逻辑，例如：打开应用、播放提示音等
+        _onKeywordDetected(result.keyword);
+      }
+    }
+  }
+
+  /// 关键词检测回调
+  void _onKeywordDetected(String keyword) {
+    debugPrint('[KWS] 触发关键词：$keyword');
+    // TODO: 根据关键词执行对应动作
+  }
+
+  /// 动态切换关键词集
+  void _switchKeywords(String newKeywords) {
+    // 释放旧流，用新关键词创建新流
+    _stream?.free();
+    _stream = _kws?.createStream(keywords: newKeywords);
+  }
+
+  @override
+  void dispose() {
+    // Widget 销毁时必须释放原生资源
+    _stream?.free();
+    _kws?.free();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('关键词唤醒演示')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              _lastKeyword,
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: () {
+                setState(() => _isListening = !_isListening);
+                // TODO: 启动/停止麦克风录制
+              },
+              child: Text(_isListening ? '停止监听' : '开始监听'),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                // 动态追加关键词示例
+                _switchKeywords('y ǎn y uán @演员/zh ī m íng @知名');
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('已切换到新关键词集')),
+                );
+              },
+              child: const Text('切换关键词'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+---
+
+## `KeywordResult` 说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `keyword` | `String` | 检测到的关键词文本；未检测到时为空字符串 `''` |
+
+---
+
+## 动态关键词格式
+
+```
+# 单个关键词
+y ǎn y uán @演员
+
+# 多个关键词（/ 分隔）
+y ǎn y uán @演员/zh ī m íng @知名
+```
+
+也可通过 `keywordsBuf` 字段以换行符分隔多个关键词（等价于关键词文件内容）：
+
+```dart
+final config = KeywordSpotterConfig(
+  // ...
+  keywordsBuf: 'y ǎn y uán @演员\nzh ī m íng @知名',
+);
+```
+
+---
+
+## 注意事项
+
+<Warning>
+**务必调用 `kws.free()` 释放原生资源**
+
+Dart GC 无法自动回收通过 FFI 分配的 C 堆内存。所有通过 `KeywordSpotter(config)` 创建的实例，以及通过 `kws.createStream()` 创建的流，在使用完毕后都必须显式调用 `free()`。
+
+在 Flutter Widget 中，推荐在 `dispose()` 方法中释放：
+
+```dart
+@override
+void dispose() {
+  _stream?.free();   // 先释放流
+  _kws?.free();      // 再释放检测器
+  super.dispose();
+}
+```
+</Warning>
+
+<Tip>
+**在 Flutter 中加载 assets 中的模型**
+
+使用 `path_provider` 插件将模型从 `assets` 复制到设备可写目录，再传入路径：
+
+```dart
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
+
+Future<String> copyAssetToCache(String assetPath) async {
+  final dir = await getApplicationCacheDirectory();
+  final file = File('${dir.path}/$assetPath');
+  if (!file.existsSync()) {
+    final data = await rootBundle.load('assets/$assetPath');
+    await file.writeAsBytes(data.buffer.asUint8List());
+  }
+  return file.path;
+}
+```
+</Tip>

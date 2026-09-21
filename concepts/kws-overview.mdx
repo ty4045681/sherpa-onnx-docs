@@ -1,0 +1,191 @@
+---
+title: "sherpa-onnx KWS 关键词唤醒完整工作原理：流式 Transducer 架构与实时解码机制"
+sidebarTitle: "KWS 原理"
+description: "sherpa-onnx KWS 采用流式 Zipformer-Transducer 模型，由 Encoder、Decoder 和 Joiner 三部分组成，支持实时音频流关键词检测。本文介绍音频处理流程、OnlineStream 状态管理、reset 调用时机以及预定义关键词与动态关键词的使用方式。"
+---
+
+sherpa-onnx 关键词唤醒（KWS）是一种轻量级持续监听技术，基于流式 Zipformer-Transducer 模型实现。设备在后台持续分析麦克风音频流，一旦检测到预设关键词便触发后续业务逻辑，无需上传音频、完全离线运行。
+
+## 什么是关键词唤醒（KWS）？
+
+关键词唤醒（Keyword Spotting，KWS）是一种**轻量级持续监听**技术：设备始终处于待机状态，对麦克风采集的音频流进行实时分析，一旦发现与预设关键词匹配的语音片段，便立即触发后续业务逻辑（如唤醒完整 ASR 引擎、执行命令等）。
+
+与完整的自动语音识别（ASR）不同，KWS 只关注有限的词汇集，因此可以用**更小的模型、更低的计算开销**实现亚秒级响应。
+
+---
+
+## 流式 Transducer 模型架构
+
+sherpa-onnx KWS 采用**流式 Zipformer-Transducer** 架构，由三个独立的 ONNX 模型文件组成：
+
+### Encoder（编码器）
+
+```
+encoder-epoch-12-avg-2-chunk-16-left-64.onnx
+```
+
+编码器负责将原始音频特征序列转换为高维声学表示。采用流式块（chunk）处理方式，每次处理一批音频帧，同时保留左侧历史上下文，兼顾实时性与准确性。
+
+### Decoder（解码器）
+
+```
+decoder-epoch-12-avg-2-chunk-16-left-64.onnx
+```
+
+解码器是一个轻量级的预测网络，维护已生成词元序列的语言上下文状态，与编码器输出共同送入 Joiner 辅助判断当前时刻应输出哪个词元。
+
+### Joiner（连接器）
+
+```
+joiner-epoch-12-avg-2-chunk-16-left-64.onnx
+```
+
+Joiner 是 Transducer 的核心组件，负责融合编码器与解码器的输出，计算每个词元在当前时间步的输出概率。KWS 场景中，`keywords_score` 参数会对关键词词元的分数进行提权，使其在解码候选路径中更容易存活。
+
+---
+
+## 音频处理完整流程
+
+```
+麦克风 / 文件
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  1. 音频预处理                           │
+│     • 重采样至 16 kHz（如需要）          │
+│     • 归一化为 float32 [-1, 1]          │
+└──────────────────┬──────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────┐
+│  2. 特征提取（FBank）                    │
+│     • 滑动窗口提取 80 维 Fbank 特征      │
+│     • 每帧约 10 ms，覆盖 25 ms 窗口      │
+└──────────────────┬──────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────┐
+│  3. 流式编码（Encoder）                  │
+│     • 积累足够帧数后触发推理             │
+│     • 保留左侧历史帧保持上下文连续性     │
+└──────────────────┬──────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────┐
+│  4. 流式解码                             │
+│     • Joiner 融合 Encoder + Decoder 输出 │
+│     • 关键词词元获得提权分数加持           │
+│     • 维护 max_active_paths 条候选路径   │
+└──────────────────┬──────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────┐
+│  5. 关键词匹配与触发                     │
+│     • 候选路径累积概率超过 threshold 时   │
+│       判定为关键词命中                    │
+│     • get_result() 返回 @ 标注的显示文本  │
+└──────────────────┬──────────────────────┘
+                   │
+              关键词命中
+                   │
+                   ▼
+            业务逻辑回调
+```
+
+---
+
+## OnlineStream：每路音频独立维护解码状态
+
+`OnlineStream` 是 sherpa-onnx KWS 的核心抽象之一。每次调用 `kws.create_stream()` 都会创建一个**独立的流对象**，其内部维护：
+
+- 当前的 Encoder 声学状态缓冲区
+- Decoder 的预测历史（已输出词元序列）
+- 解码器的候选路径集合
+- 关键词匹配的进度状态
+
+**多路并发**的典型用法：
+
+```python
+# 同时处理来自多个麦克风 / 多个音频文件的流
+streams = [kws.create_stream() for _ in range(8)]
+
+for stream, chunk in zip(streams, audio_chunks):
+    stream.accept_waveform(sample_rate, chunk)
+
+# 批量解码，效率更高
+kws.decode_streams(streams)
+
+for stream in streams:
+    result = kws.get_result(stream)
+    if result:
+        print(f"检测到：{result}")
+        kws.reset_stream(stream)
+```
+
+各流之间**互不影响**，可安全地在多线程环境中并发使用（每个线程持有独立的 `OnlineStream` 对象）。
+
+---
+
+## 为什么检测到关键词后必须调用 reset？
+
+流式解码器不会自动清除匹配状态。当关键词的候选路径达到触发阈值后，如果不调用重置，解码器会：
+
+1. 持续在该路径上累积概率，导致**同一关键词在短时间内被多次触发**。
+2. 已消耗的词元会影响 Decoder 的语言模型状态，使后续匹配产生偏差。
+
+调用 `kws.reset_stream(stream)` 会：
+- 清除所有候选路径，回到初始解码状态。
+- 保留 Encoder 的声学状态（不丢弃上下文），保证重置后立即能继续监听。
+
+```python
+while kws.is_ready(stream):
+    kws.decode_stream(stream)
+    result = kws.get_result(stream)
+    if result:
+        kws.reset_stream(stream)   # ← 检测到后立即重置，避免重复触发
+        handle_keyword(result)
+```
+
+<Warning>
+  检测到关键词后**必须立即**调用 `kws.reset_stream(stream)`，然后再继续送入音频或进行下一轮解码。漏调 reset 会导致同一关键词反复触发。
+</Warning>
+
+---
+
+## 预定义关键词 vs 动态关键词
+
+sherpa-onnx KWS 支持两种定义关键词的方式，可以**组合使用**：
+
+### 预定义关键词（keywords_file）
+
+在初始化 `KeywordSpotter` 时通过 `keywords_file` 参数指定关键词文件。
+
+- **作用域**：对该 `KeywordSpotter` 实例创建的**所有流**均生效。
+- **适用场景**：产品固定的唤醒词（如「你好小爱」），在整个应用生命周期内不变。
+
+```python
+kws = sherpa_onnx.KeywordSpotter(
+    tokens="./model/tokens.txt",
+    encoder="./model/encoder.onnx",
+    decoder="./model/decoder.onnx",
+    joiner="./model/joiner.onnx",
+    keywords_file="./keywords.txt",  # 所有流共享这批关键词
+)
+```
+
+### 动态关键词（create_stream 时传入）
+
+在调用 `kws.create_stream(keywords)` 时以字符串形式传入**额外**的关键词。
+
+- **作用域**：仅对当前创建的这一路流生效，不影响其他流。
+- **适用场景**：用户自定义唤醒词、A/B 测试不同关键词、按会话动态切换词汇表。
+- **格式**：多个关键词用 `/` 分隔，语法与关键词文件行格式相同。
+
+```python
+# 该流在预定义词之外，还会额外检测「演员」和「知名」
+stream = kws.create_stream("y ǎn y uán @演员/zh ī m íng @知名")
+```
+
+<Note>
+  动态关键词与预定义关键词**叠加**生效，而非替换。如果 `keywords_file` 中已有某关键词，无需在 `create_stream` 中重复添加。
+</Note>

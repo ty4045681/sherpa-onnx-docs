@@ -1,0 +1,238 @@
+---
+title: "sherpa-onnx KeywordSpotter 全部配置参数详解：模型路径、灵敏度与推理后端调参指南"
+sidebarTitle: "配置参数"
+description: "说明 sherpa-onnx KeywordSpotter 所有初始化参数的默认值与调节建议，涵盖模型路径、特征提取（sample_rate=16000、feature_dim=80）、灵敏度（keywords_score=1.0、keywords_threshold=0.25）与推理后端配置。"
+---
+
+`KeywordSpotter` 在初始化时接受一组配置参数，涵盖**模型路径**、**特征提取**、**解码灵敏度**和**推理后端**四个维度。下面按类别逐一介绍每个参数的作用、默认值与建议取值。
+
+```python
+import sherpa_onnx
+
+kws = sherpa_onnx.KeywordSpotter(
+    tokens="./model/tokens.txt",
+    encoder="./model/encoder.onnx",
+    decoder="./model/decoder.onnx",
+    joiner="./model/joiner.onnx",
+    keywords_file="./keywords.txt",
+    num_threads=2,
+    sample_rate=16000,
+    feature_dim=80,
+    max_active_paths=4,
+    keywords_score=1.0,
+    keywords_threshold=0.25,
+    num_trailing_blanks=1,
+    provider="cpu",
+    device=0,
+)
+```
+
+---
+
+## 模型路径参数
+
+<ParamField path="tokens" type="string" required>
+  词元表文件路径，即模型目录中的 `tokens.txt`。
+
+  文件每行包含两列：`符号 整数ID`，定义了模型词汇表中所有词元（拼音音节、BPE 子词、标点等）及其对应的整数编号。关键词文件中的词元写法必须与此文件一致。
+
+  ```python
+  tokens="./sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/tokens.txt"
+  ```
+</ParamField>
+
+<ParamField path="encoder" type="string" required>
+  编码器 ONNX 模型文件路径。
+
+  编码器将音频特征序列转换为高维声学表示，是推理开销最大的组件。文件名通常包含训练轮次与上下文窗口信息，例如：
+
+  ```python
+  encoder="./model/encoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+  ```
+
+  移动端优化版本（int8 量化）文件名末尾带有 `.int8.onnx`，体积更小，速度更快，精度略有损失。
+</ParamField>
+
+<ParamField path="decoder" type="string" required>
+  解码器 ONNX 模型文件路径。
+
+  轻量级预测网络，维护已生成词元序列的语言模型状态。体积远小于编码器。
+
+  ```python
+  decoder="./model/decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+  ```
+</ParamField>
+
+<ParamField path="joiner" type="string" required>
+  连接器 ONNX 模型文件路径。
+
+  Transducer 核心组件，在每个时间步融合编码器与解码器输出，计算词元输出概率。
+
+  ```python
+  joiner="./model/joiner-epoch-12-avg-2-chunk-16-left-64.onnx"
+  ```
+</ParamField>
+
+<ParamField path="keywords_file" type="string" required>
+  关键词定义文件路径，即包含所有预定义关键词的 `keywords.txt`。
+
+  文件格式详见[关键词文件格式](/concepts/keywords-file-format)。该文件中的关键词对该 `KeywordSpotter` 实例创建的**所有流**均生效。
+
+  ```python
+  keywords_file="./keywords.txt"
+  ```
+</ParamField>
+
+---
+
+## 特征提取参数
+
+<ParamField path="sample_rate" type="float" default="16000">
+  训练模型时使用的音频采样率（Hz）。
+
+  绝大多数 sherpa-onnx KWS 模型均以 16000 Hz 训练。若输入音频的采样率不同，需要在调用 `accept_waveform` 前**手动重采样**。
+
+  ```python
+  sample_rate=16000  # 保持默认即可
+  ```
+</ParamField>
+
+<ParamField path="feature_dim" type="int" default="80">
+  Fbank 特征的维度数（Mel 滤波器组数量）。
+
+  该值由模型训练时固定，通常为 80，无需修改。与模型不匹配的 `feature_dim` 会导致推理失败。
+
+  ```python
+  feature_dim=80  # 保持默认即可
+  ```
+</ParamField>
+
+---
+
+## 解码与灵敏度参数
+
+<ParamField path="max_active_paths" type="int" default="4">
+  解码时保留的最大候选路径数。
+
+  - 值越大，搜索空间越广，检测准确率更高，但计算量也线性增长。
+  - 值越小，速度更快，但可能漏检部分关键词。
+  - 对 KWS 场景，通常 4 到 8 已足够；仅在关键词音节高度相似、漏检率较高时才需要增大。
+
+  ```python
+  max_active_paths=4
+  ```
+</ParamField>
+
+<ParamField path="keywords_score" type="float" default="1.0">
+  关键词词元在解码中的提权分数（boosting score）。
+
+  每当候选路径预测到属于某关键词的词元时，该路径的累积分数会额外加上此值，使关键词路径相对于非关键词路径更容易存活。
+
+  - **值越大** → 关键词词元获得更强的优先级 → 更**容易被检测到**，但误触发率也可能上升。
+  - **值越小** → 更保守，减少误触发，但漏检率上升。
+  - 推荐调节范围：0.5 到 3.0。
+
+  ```python
+  keywords_score=1.0   # 默认值，适合大多数场景
+  # keywords_score=2.0  # 灵敏度偏低时可调大
+  ```
+</ParamField>
+
+<ParamField path="keywords_threshold" type="float" default="0.25">
+  关键词触发的概率阈值，取值范围为 0 到 1。
+
+  当某条关键词路径的归一化概率超过此阈值时，判定为关键词命中。
+
+  - **值越大** → 阈值越高 → 更**难触发**，误触发少，但容易漏检。
+  - **值越小** → 阈值越低 → 更**容易触发**，灵敏度高，但误触发率上升。
+  - 推荐调节范围：0.1 到 0.5。
+
+  ```python
+  keywords_threshold=0.25   # 默认值
+  # keywords_threshold=0.1   # 灵敏度高的场景（如低信噪比环境）
+  # keywords_threshold=0.4   # 严格场景（如金融、安全类命令）
+  ```
+</ParamField>
+
+<ParamField path="num_trailing_blanks" type="int" default="1">
+  关键词词元序列末尾需要跟随的空白帧数量，满足后才触发。
+
+  Transducer 解码器使用空白帧（blank token）表示"当前时间步不输出任何词元"。要求关键词后必须紧跟若干空白帧，可以：
+
+  1. 确保关键词已经完整说完，而不是只说了开头。
+  2. 在关键词之间存在音节重叠时，增大此值可**避免提前触发**。
+
+  **何时需要调大？** 当关键词词汇表中存在前缀关系（如「小爱」和「小爱同学」），可将此值调至 4 到 8，让短关键词等待足够的静音后再触发，避免误匹配。
+
+  ```python
+  num_trailing_blanks=1    # 默认值
+  # num_trailing_blanks=8  # 关键词有重叠时
+  ```
+</ParamField>
+
+---
+
+## 性能与后端参数
+
+<ParamField path="num_threads" type="int" default="2">
+  ONNX Runtime 推理线程数。
+
+  - 增大线程数可降低单次推理延迟，但在多流并发场景下可能与流级并发竞争 CPU 资源。
+  - 移动设备（4 核以下）建议设为 1 或 2；服务器多路部署时建议每实例 1 到 2 线程，靠进程或流数量提升吞吐量。
+
+  ```python
+  num_threads=2
+  ```
+</ParamField>
+
+<ParamField path="provider" type="string" default="cpu">
+  ONNX Runtime 执行后端（Execution Provider）。
+
+  | 取值 | 描述 | 适用平台 |
+  |------|------|---------|
+  | `"cpu"` | 纯 CPU 推理，兼容性最好 | 所有平台 |
+  | `"cuda"` | NVIDIA GPU 加速，需安装 CUDA 版 ONNX Runtime | Windows / Linux |
+  | `"coreml"` | Apple Neural Engine / GPU 加速 | macOS / iOS |
+
+  ```python
+  provider="cpu"     # 默认，通用
+  provider="cuda"    # NVIDIA GPU 加速
+  provider="coreml"  # Apple 平台加速
+  ```
+</ParamField>
+
+<ParamField path="device" type="int" default="0">
+  当 `provider="cuda"` 时，指定使用的 GPU 设备编号。单 GPU 环境保持默认值 0 即可。
+
+  ```python
+  device=0  # 使用第一块 GPU
+  ```
+</ParamField>
+
+---
+
+## 调参建议
+
+<Tip>
+  **灵敏度调节路线图**
+
+  遇到关键词**漏检**时，按以下顺序调整：
+  1. 先调小 `keywords_threshold`（如从 0.25 降至 0.1）
+  2. 再调大 `keywords_score`（如从 1.0 升至 2.0）
+  3. 最后适当增大 `max_active_paths`（如从 4 升至 8）
+
+  遇到关键词**误触发**时，按以下顺序调整：
+  1. 先调大 `keywords_threshold`（如从 0.25 升至 0.4）
+  2. 再调小 `keywords_score`（如从 1.0 降至 0.5）
+  3. 若关键词有音节重叠，调大 `num_trailing_blanks`（如调至 4 到 8）
+
+  每次**只调整一个参数**，并用一批标注好的测试音频评估召回率和误触发率，直到达到业务可接受的平衡点。
+</Tip>
+
+<Tip>
+  **性能与延迟优化**
+
+  - 移动端优先使用 **int8 量化模型**（文件名含 `.int8.onnx`），在几乎不损失准确率的前提下将模型体积缩小约 75%，推理速度显著提升。
+  - 在 Apple 设备上设置 `provider="coreml"` 可利用 Neural Engine，功耗更低，延迟更短。
+  - 在多音频流并发场景中，优先使用 `kws.decode_streams(list_of_streams)` 进行**批量解码**，比循环调用 `decode_stream` 效率更高。
+</Tip>
