@@ -563,6 +563,109 @@ flowchart LR
 
 搜索阶段由 `TransducerKeywordDecoder::Decode` 遍历 `t=0…U-1`。每帧先展开所有流的候选路径，利用 `hyps_row_splits` 记录各流边界，得到本帧总路径数 `H_t`。预测网络的批次轴因此是 `H_t`，不能固定写成 `N` 或 `N×max_active_paths`。
 
+### 关键词图 ContextGraph 的构建
+
+搜索用关键词图（trie + fail 回退边）判断候选路径是否到达目标词。相关签名（`sherpa_onnx` 命名空间，`sherpa-onnx/csrc/context-graph.h`）：
+
+```cpp
+ContextGraph(const std::vector<std::vector<int32_t>> &token_ids,
+             float context_score, float ac_threshold,
+             const std::vector<float> &scores = {},
+             const std::vector<std::string> &phrases = {},
+             const std::vector<float> &ac_thresholds = {});
+void Build(const std::vector<std::vector<int32_t>> &token_ids,
+           const std::vector<float> &scores,
+           const std::vector<std::string> &phrases,
+           const std::vector<float> &ac_thresholds) const;   // private
+void FillFailOutput() const;                                 // private
+std::tuple<float, const ContextState *, const ContextState *> ForwardOneStep(
+    const ContextState *state, int32_t token_id,
+    bool strict_mode = true) const;
+const ContextState *Root() const;
+```
+
+`Build()` 按词元序列建立共享前缀树。根节点 `token=-1`，`fail` 指向自身；普通节点记录当前词元、深度 `level` 和分数，终止节点另存 `phrase`、`ac_threshold`。逐关键词的分数或阈值数组为空，或者相应值为 `0.0f` 时，使用图的全局默认值（即配置中的 `keywords_score`、`keywords_threshold`）。共享节点的 `token_score` 取已有值与当前值的较大者；同一终止节点被再次登记时，其短语及阈值由后一次赋值覆盖。
+
+<Note>
+  图分数是用于搜索排名的奖励数值。`token_score` 记录该节点的词元奖励，`node_score` 在构图时按父节点累计值加当前词元奖励计算；终止节点以该累计值初始化 `output_score`，随后还可能叠加回退链上的输出贡献。这些量不表示声学概率。
+</Note>
+
+`FillFailOutput()` 按广度优先顺序建立 `fail` 回退边，并从回退链上寻找终止节点作为 `output`，同时累加其 `output_score`。回退用于在失配后保留仍可能匹配的后缀，`output` 用于报告当前路径后缀中的完整关键词。节点由图中的 `unique_ptr` 持有，候选仅保存 `const ContextState *`，使用候选期间须保持相应图存活。
+
+### 推进关键词图与候选合并
+
+保留扩展按以下两类更新：
+
+| 分支条件 | 更新行为 |
+| --- | --- |
+| `new_token != 0 && new_token != unk_id_` | 追加词元、帧号 `t + frame_offset` 和 `exp(ell[h,v])`；将尾部空白计数置零；调用 `ForwardOneStep` |
+| 词元为 `0` 或 `unk_id_` | 仅将尾部空白计数加一；保留词元历史及图状态；仍计入该词元的声学对数概率 |
+
+`unk_id_` 从词元表的 `<unk>` 项取得，不存在时为 `-1`。因此这里的尾部空白计数也包含被当作空白处理的未知词元，不能直接解释为纯静音帧数。
+
+`ForwardOneStep()` 有直接边时取新节点的 `token_score`；否则沿 `fail` 寻找可接续节点，以 `node->node_score - state->node_score` 计算回退后的分数变化。KWS 传入两个参数，使用默认 `strict_mode=true`，返回的增量为上述分数加新节点的 `output_score`。搜索采用返回值的前两项，即分数增量和新状态。
+
+```mermaid
+flowchart TD
+    A[普通词元扩展] --> B{存在直接边}
+    B -->|是| C[沿直接边前进]
+    B -->|否| D[沿回退边接续]
+    C --> E[取得新图状态]
+    D --> E
+    E --> F{回到根节点}
+    F -->|是| G[清除预测历史]
+    F -->|否| H[保留预测历史]
+    G --> I[加入图分数]
+    H --> I
+    I --> J{词元序列相同}
+    J -->|是| K[合并累计分数]
+    J -->|否| L[保留新候选]
+```
+
+图中，回到根节点时 `ys` 恢复为初始填充上下文，`timestamps`、`ys_probs` 清空；本路径累计分数仍按本步更新，不归零。非根节点回退保留已有发射历史，这会影响后文概率的取值范围。空白分支跳过图推进，直接进入候选合并。
+
+`Hypotheses::Add()`（`sherpa-onnx/csrc/hypothesis.h`）以完整 `ys` 生成的 `Key()` 为合并依据。相同键只通过 `LogAdd<double>()` 更新已存候选的 `log_prob`，即采用数值稳定的对数求和方式合并路径权重；时间戳、逐词元概率、尾部空白计数和图状态均保留首次插入者的值。由于插入顺序来自前述降序筛选，同键扩展的筛选分数不同时，这些附属状态来自其中筛选分数最高者；同分选择没有稳定性保证。合并后的候选数可以小于 `max_active_paths_`。
+
+<Warning>
+  每条扩展每个编码器输出帧至多追加一个普通词元，随即进入下一帧的搜索；当前帧内没有"追加词元后再次运行预测网络和连接网络"的循环。这一结论针对逐帧搜索实现，不能套用到其他自回归解码策略。
+</Warning>
+
+### 选择最优候选并检查图状态
+
+每帧、每个流调用一次 `hyps.GetMostProbable(false)`，从合并后的候选中选出一条：
+
+```cpp
+// Hypotheses
+Hypothesis GetMostProbable(bool length_norm) const;
+
+// Hypothesis
+double TotalLogProb() const;
+
+// ContextGraph
+std::pair<bool, const ContextState *> IsMatched(
+    const ContextState *state) const;
+```
+
+参数 `false` 表示不做长度归一化；比较值为 `TotalLogProb()`，即 `log_prob + lm_log_prob`。标准 KWS 初始化将 `lm_log_prob` 置为默认的零，本解码循环也不更新它，因此这条路径实际按包含图分数及候选合并贡献的 `log_prob` 排名。通用方法的 `true` 分支会除以 `ys.size()`，本处未使用该分支。
+
+随后仅对这条最优候选调用 `IsMatched(best_hyp.context_state)`。若其图状态不匹配，代码不会继续检查其余候选是否已经到达关键词终点。
+
+```mermaid
+flowchart TD
+    A[本流合并候选] --> B[选择单条最优]
+    B --> C{当前节点终止}
+    C -->|是| D[选择当前节点]
+    C -->|否| E{存在输出节点}
+    E -->|是| F[选择后缀终点]
+    E -->|否| G[本帧不匹配]
+    D --> H[进入触发检查]
+    F --> H
+```
+
+`IsMatched()` 优先返回当前终止节点，否则返回 `output` 指向的终止节点；两者均不存在才返回不匹配。即使一个状态同时对应完整长词及多个关键词后缀，此调用也只返回一个 `matched_state`。图分数中可能累加多个输出贡献，并不等于结果接口在此处枚举多个命中。
+
+`matched_state->level` 给出所选关键词的词元数，`phrase` 和 `ac_threshold` 给出该终止节点保存的关键词文本及声学阈值。这里取得的是所选终止节点的属性，不能直接以当前搜索节点的深度代替，尤其是通过 `output` 命中后缀时。图状态匹配只是触发判定的前置条件。
+
 ### 命中条件
 
 完整触发条件如下，比较符必须按源码区分：
@@ -804,7 +907,7 @@ cmake --build build-kws-doc --target kws-cxx-api --parallel 4
 | 单流解码 | `cxx::KeywordSpotter::Decode` → `SherpaOnnxDecodeKeywordStream` → 内部 `DecodeStream` → `DecodeStreams` | 解码、命中与结果 |
 | 编码器调用 | `StackStates` → `RunEncoder` → `UnStackStates` | 编码器与逐帧搜索 |
 | 预测与连接 | `BuildDecoderInput` → `RunDecoder` → `RunJoiner` | 编码器与逐帧搜索 |
-| 搜索和命中 | `TransducerKeywordDecoder::Decode` → `TopkIndex` → `ForwardOneStep` → `Hypotheses::Add` → `IsMatched` | 命中条件 |
+| 搜索和命中 | `TransducerKeywordDecoder::Decode` → `TopkIndex` → `ForwardOneStep` → `Hypotheses::Add` → `IsMatched` | 推进关键词图与候选合并、选择最优候选并检查图状态 |
 | 读取结果 | `GetResult` → `GetKeywordResult(true)` → `Convert` → C/C++ 结果复制 | GetResult 与重复结果过滤 |
 | 重置 | 公共 `Reset` → `SherpaOnnxResetKeywordStream` → `InitOnlineStream` | 四种不同的状态动作 |
 | 输入结束 | `InputFinished` → 特征结束处理 → `while (IsReady)` 排空 | 输入结束与重采样尾部 |
